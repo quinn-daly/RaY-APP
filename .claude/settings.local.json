@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''app.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import streamlit; print\\(''streamlit:'', streamlit.__version__\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''app.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(curl -s http://localhost:8501/)",
+      "Bash(kill %1)"
+    ]
+  }
+}

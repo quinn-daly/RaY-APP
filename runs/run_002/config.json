@@ -1,0 +1,28 @@
+{
+  "run_id": "run_002",
+  "created_at": "2026-03-20T16:41:19",
+  "seminal_intention": "threshold as negotiation between public institution and private life",
+  "lenses": [
+    {
+      "lens_id": 1,
+      "lens_name": "Parsed Complexity",
+      "description": "Decompose the intention into its constituent components and structural relationships."
+    },
+    {
+      "lens_id": 2,
+      "lens_name": "Surfaced Assumptions",
+      "description": "Identify and interrogate the unstated premises that shape the design territory."
+    },
+    {
+      "lens_id": 3,
+      "lens_name": "Multiple Perspectives",
+      "description": "Examine the intention through the eyes of different stakeholders and disciplines."
+    },
+    {
+      "lens_id": 4,
+      "lens_name": "Logical Scaffolding",
+      "description": "Reconstruct the underlying argumentative structure and its decision dependencies."
+    }
+  ],
+  "settings": {}
+}

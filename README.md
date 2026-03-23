@@ -1,0 +1,143 @@
+# Metabolic Prompt Studio
+
+A browser-based design tool that helps you explore architectural ideas through structured AI prompt-writing — without needing any coding knowledge or API access.
+
+> **This is a concept demo. All outputs are generated locally on your computer. No internet connection or API key is required.**
+
+---
+
+## What it does
+
+You start with a single sentence — your design intention — and the app helps you unfold it into a structured set of image prompts. These prompts are organised across four conceptual lenses and three levels of specificity, giving you 12 distinct prompt variations to work with.
+
+You then generate placeholder images from those prompts, evaluate and annotate them, and finish with a vocabulary analysis and export of your work.
+
+The whole process is divided into three phases:
+
+---
+
+### Phase 1 — Prompt Refraction
+
+You type a **seminal intention**: a sentence or short paragraph describing your architectural idea.
+
+*Example: "The vertical inhabitation of collective memory."*
+
+The app refracts this into **12 prompts** using four conceptual lenses:
+
+| Lens | What it does |
+|---|---|
+| Parsed Complexity | Breaks your idea into its structural components |
+| Surfaced Assumptions | Asks what unstated premises your idea relies on |
+| Multiple Perspectives | Looks at the idea through different stakeholders and disciplines |
+| Logical Scaffolding | Rebuilds the underlying argument and decision structure |
+
+Each lens produces three prompts — low, medium, and high specificity — moving from broad to granular.
+
+You can **edit** any prompt text directly, **lock** prompts to prevent accidental changes, or **exclude** prompts you don't want to carry forward. Every change is saved automatically.
+
+---
+
+### Phase 2 — Image Generation
+
+Each of your 12 prompts generates **4 image variations**, giving you up to 48 images per run.
+
+Before generating, you can:
+- Refine the prompt text one last time
+- Add an **intervention note** — a short instruction that shifts the image's composition (e.g. *"emphasise civic scale"* or *"consider non-human users"*)
+
+Once images are generated, you can:
+- **Pin** images you want to keep
+- Add a short **observation note** to any image
+- Regenerate individual variations or all four at once
+
+A **Generate remaining** button lets you batch-generate all prompts at once when you're ready.
+
+---
+
+### Phase 3 — Recap & Analysis
+
+A summary of your run including:
+
+- **Vocabulary analysis** — the most frequent words across your prompts, broken down overall, by lens, and by specificity level. This reveals the language patterns shaping your design thinking.
+- **Pinned gallery** — all your pinned images in one view, with their source prompt and your notes.
+- **Export** — download your prompts, image log, vocabulary data, and a recap summary as JSON and CSV files.
+
+---
+
+## Installation
+
+You will need **Python 3.10 or later** installed on your computer. If you are unsure whether you have it, open a terminal and type `python --version`.
+
+**Step 1 — Open a terminal and navigate to the project folder**
+
+```
+cd path/to/RaY-APP
+```
+
+**Step 2 — Create a virtual environment** (keeps dependencies contained)
+
+```
+python -m venv .venv
+```
+
+Then activate it:
+
+- On **Windows**: `.venv\Scripts\activate`
+- On **Mac or Linux**: `source .venv/bin/activate`
+
+You should see `(.venv)` appear at the start of your terminal prompt.
+
+**Step 3 — Install dependencies**
+
+```
+pip install -r requirements.txt
+```
+
+This installs Streamlit (the app framework), Pillow (for image generation), and pandas (for data tables). It takes about a minute.
+
+---
+
+## Running the app
+
+With your virtual environment active, run:
+
+```
+streamlit run app.py
+```
+
+The app will open automatically in your browser at `http://localhost:8501`.
+
+To stop the app, return to the terminal and press `Ctrl + C`.
+
+---
+
+## Where your work is saved
+
+Every run is saved automatically to a folder called `runs/` inside the project directory. You do not need to manually save anything.
+
+```
+runs/
+  run_001/
+    config.json       Your seminal intention and lens settings
+    prompts.json      All 12 prompts and any edits you made
+    image_log.json    Image records, pins, notes, and intervention notes
+    images/           The generated image files (PNG)
+```
+
+Each time you create a new run, a new numbered folder is created. Loading an existing run from the sidebar restores everything exactly as you left it.
+
+Exported files (vocab CSV, recap JSON) are downloaded directly to your browser's downloads folder.
+
+---
+
+## What is simulated vs. what would be real
+
+This app is a working prototype of a workflow — the interface, structure, and data are fully functional, but the AI outputs are stand-ins.
+
+| What you see now | What it would be in a live version |
+|---|---|
+| Prompts generated from sentence templates using a hash of your intention | Prompts generated by a large language model (e.g. Claude or GPT-4), producing unique and contextually rich text each time |
+| Placeholder images built from geometric patterns derived from your prompt text | Real images generated by an image AI (e.g. Midjourney, DALL-E, or Stable Diffusion) via API |
+| Deterministic outputs — same input always produces the same result | Generative outputs — each run would produce different results |
+
+The lenses, phases, intervention notes, vocabulary analysis, pinning, and export are all part of the real workflow design and would carry over directly into an API-enabled version.
