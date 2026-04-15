@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -24,6 +25,7 @@ from core.image_sim import generate_placeholder_image
 from core.vocab import analyze_vocab, analyze_drift, top_n
 from core import storage
 from core.recurrence import run_recurrence_step, compute_similarity
+from core.image_providers import available_providers, get_provider, ProviderError
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -68,6 +70,12 @@ def _init_state() -> None:
         "recurrent_prompt_states": {},
         # per-strand immutable origin text: {prompt_id → original Phase-1 text}
         "original_prompt_texts":   {},
+        # ── recurrence pacing + provider ────────────────────────────────────
+        "recurrence_provider":         "sim",   # provider name string
+        "recurrence_interval":         2,       # seconds between auto steps
+        "recurrence_display_cadence":  1,       # re-render every N steps
+        "recurrence_logging_cadence":  5,       # save to disk every N steps
+        "recurrence_gen_since_save":   0,       # steps since last save
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -195,22 +203,51 @@ def _run_one_recurrence_step() -> None:
         prompt.prompt_id, prompt.text
     )
 
-    step = run_recurrence_step(
-        prompt=prompt,
-        original_prompt_text=original_text,
-        seminal_intention=st.session_state.run_config.seminal_intention,
-        iteration=st.session_state.recurrence_iteration,
-        intensity=st.session_state.recurrence_intensity,
-        current_text=current_text,
-        run_id=st.session_state.run_id,
-    )
+    # Resolve provider; fall back to sim on any ProviderError
+    provider_name = st.session_state.get("recurrence_provider", "sim")
+    try:
+        provider = get_provider(provider_name)
+    except ProviderError:
+        provider = get_provider("sim")
+        st.session_state.recurrence_provider = "sim"
+
+    try:
+        step = run_recurrence_step(
+            prompt=prompt,
+            original_prompt_text=original_text,
+            seminal_intention=st.session_state.run_config.seminal_intention,
+            iteration=st.session_state.recurrence_iteration,
+            intensity=st.session_state.recurrence_intensity,
+            current_text=current_text,
+            run_id=st.session_state.run_id,
+            provider=provider,
+        )
+    except ProviderError:
+        # Live provider failed mid-run; degrade silently to sim for this step
+        fallback = get_provider("sim")
+        step = run_recurrence_step(
+            prompt=prompt,
+            original_prompt_text=original_text,
+            seminal_intention=st.session_state.run_config.seminal_intention,
+            iteration=st.session_state.recurrence_iteration,
+            intensity=st.session_state.recurrence_intensity,
+            current_text=current_text,
+            run_id=st.session_state.run_id,
+            provider=fallback,
+        )
 
     # Advance the strand's evolving text
     st.session_state.recurrent_prompt_states[prompt.prompt_id] = step.mutated_text
 
-    # Persist
+    # Persist according to logging cadence
     st.session_state.image_records.append(step.image_record)
-    _save_records()
+    st.session_state.recurrence_gen_since_save = (
+        st.session_state.recurrence_gen_since_save + 1
+    )
+    logging_cadence = st.session_state.get("recurrence_logging_cadence", 5)
+    if st.session_state.recurrence_gen_since_save >= logging_cadence:
+        _save_records()
+        st.session_state.recurrence_gen_since_save = 0
 
     # Advance global counters
     st.session_state.recurrence_iteration  += 1
@@ -237,7 +274,8 @@ def _render_recurrence_section() -> None:
             "Transform the prompt strands continuously. "
             "The seminal intention persists; its refractions evolve."
         )
-        col_btn, col_intensity, _ = st.columns([2, 2, 3])
+
+        col_btn, col_intensity, col_provider = st.columns([2, 2, 3])
         with col_btn:
             if st.button("Start Recurrence", type="primary", key="rec_start"):
                 st.session_state.recurrence_running = True
@@ -251,6 +289,55 @@ def _render_recurrence_section() -> None:
                 key="rec_intensity_idle",
             )
             st.session_state.recurrence_intensity = intensity
+        with col_provider:
+            providers = available_providers()
+            current_p = st.session_state.get("recurrence_provider", "sim")
+            if current_p not in providers:
+                current_p = "sim"
+            chosen = st.selectbox(
+                "Image provider",
+                options=providers,
+                index=providers.index(current_p),
+                key="rec_provider_idle",
+            )
+            st.session_state.recurrence_provider = chosen
+
+        # Pacing controls
+        with st.expander("Pacing controls", expanded=False):
+            p_col1, p_col2, p_col3 = st.columns(3)
+            with p_col1:
+                interval = st.number_input(
+                    "Generation interval (s)",
+                    min_value=0,
+                    max_value=60,
+                    value=st.session_state.get("recurrence_interval", 2),
+                    step=1,
+                    help="Seconds to wait between auto-advance steps.",
+                    key="rec_interval_idle",
+                )
+                st.session_state.recurrence_interval = interval
+            with p_col2:
+                display_cadence = st.number_input(
+                    "Display cadence (steps)",
+                    min_value=1,
+                    max_value=20,
+                    value=st.session_state.get("recurrence_display_cadence", 1),
+                    step=1,
+                    help="Re-render the UI every N steps.",
+                    key="rec_display_cadence_idle",
+                )
+                st.session_state.recurrence_display_cadence = display_cadence
+            with p_col3:
+                logging_cadence = st.number_input(
+                    "Save cadence (steps)",
+                    min_value=1,
+                    max_value=50,
+                    value=st.session_state.get("recurrence_logging_cadence", 5),
+                    step=1,
+                    help="Write image_log.json to disk every N steps.",
+                    key="rec_logging_cadence_idle",
+                )
+                st.session_state.recurrence_logging_cadence = logging_cadence
         return
 
     # ── Running controls ──────────────────────────────────────────────────────
@@ -290,9 +377,11 @@ def _render_recurrence_section() -> None:
     # ── Status line ───────────────────────────────────────────────────────────
     recurrent_count = sum(1 for r in st.session_state.image_records if r.is_recurrent)
     status = "⏸ Paused" if st.session_state.recurrence_paused else "● Running"
+    active_provider = st.session_state.get("recurrence_provider", "sim")
     st.caption(
         f"{status}  ·  Iteration {st.session_state.recurrence_iteration}"
         f"  ·  {recurrent_count} recurrent image{'s' if recurrent_count != 1 else ''} generated"
+        f"  ·  provider: `{active_provider}`"
     )
 
     # ── Active strand states ──────────────────────────────────────────────────
@@ -337,11 +426,18 @@ def _render_recurrence_section() -> None:
                 st.caption(f"similarity: `{rec.semantic_similarity:.2f}`")
 
     # ── Auto-advance: generate one step then rerun ────────────────────────────
-    # This uses Streamlit's rerun as the loop clock. Each script execution
-    # renders the current state, generates one new image, then triggers the
-    # next execution. The user can stop this at any time with Pause or Finalize.
+    # Streamlit's rerun is the loop clock. Each execution renders state, generates
+    # one step (or a display_cadence batch), sleeps for the configured interval,
+    # then triggers the next execution. Pause / Finalize break the cycle.
     if not st.session_state.recurrence_paused and _prompts_included():
-        _run_one_recurrence_step()
+        display_cadence = max(1, st.session_state.get("recurrence_display_cadence", 1))
+        interval        = st.session_state.get("recurrence_interval", 2)
+        for _ in range(display_cadence):
+            _run_one_recurrence_step()
+            if st.session_state.recurrence_paused:
+                break
+        if interval > 0:
+            time.sleep(interval)
         st.rerun()
 
 

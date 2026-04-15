@@ -79,6 +79,7 @@ class ImageRecord:
     semantic_similarity:  float = 1.0  # Jaccard vs original Phase-1 prompt text
     generation_iteration: int   = 0    # global recurrence counter (0 = original 4 vars)
     is_recurrent:         bool  = False
+    provider_name:        str   = ""   # image provider used (e.g. "sim", "replicate_flux")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -101,4 +102,5 @@ class ImageRecord:
             semantic_similarity=d.get("semantic_similarity", 1.0),
             generation_iteration=d.get("generation_iteration", 0),
             is_recurrent=d.get("is_recurrent", False),
+            provider_name=d.get("provider_name", ""),
         )

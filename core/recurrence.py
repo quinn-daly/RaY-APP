@@ -35,12 +35,12 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from core.models import ImageRecord, Prompt
-from core.image_sim import generate_placeholder_image
 from core.vocab import tokenize
 from core.prompt_sim import _BANKS, extract_concept
+from core.image_providers import ImageProvider, get_provider
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +195,7 @@ def run_recurrence_step(
     intensity: str,
     current_text: str,
     run_id: str,
+    provider: Optional[ImageProvider] = None,
 ) -> RecurrenceStep:
     """
     Execute one recurrence cycle for a prompt strand.
@@ -207,11 +208,15 @@ def run_recurrence_step(
         intensity:            "low" | "medium" | "high" — governs mutation type pool
         current_text:         The evolving text for this strand before this step
         run_id:               Run identifier for image file paths
+        provider:             ImageProvider to use; defaults to the registered "sim" provider.
 
     Returns:
         RecurrenceStep containing the mutated text, mutation metadata, and a
         fully populated ImageRecord with lineage fields set.
     """
+    if provider is None:
+        provider = get_provider("sim")
+
     concept        = extract_concept(seminal_intention)
     mutation_type  = _select_mutation_type(iteration, intensity)
     mutated_text, mutation_note = _mutate_text(
@@ -224,14 +229,14 @@ def run_recurrence_step(
     img_id   = f"{prompt.prompt_id}_r{iteration:04d}"
     rel_path = f"runs/{run_id}/images/{img_id}.png"
 
-    generate_placeholder_image(
-        prompt_text=mutated_text,
-        variation_index=iteration % 4,   # cycle 0–3 to maintain visual variety
-        intervention_note="",
+    img_result = provider.generate(
+        prompt=mutated_text,
+        output_path=Path(rel_path),
+        variation_index=iteration % 4,
         lens_id=prompt.lens_id,
         lens_name=prompt.lens_name,
         specificity=prompt.specificity,
-        output_path=Path(rel_path),
+        intervention_note="",
     )
 
     record = ImageRecord(
@@ -239,17 +244,18 @@ def run_recurrence_step(
         source_prompt_id=prompt.prompt_id,
         variation_index=iteration % 4,
         intervention_note="",
-        image_path=rel_path,
+        image_path=img_result.image_path,
         pinned=False,
         created_at=datetime.now().isoformat(timespec="seconds"),
         user_note=None,
         # Lineage
         parent_prompt_text=current_text,
-        current_prompt_text=mutated_text,
+        current_prompt_text=img_result.prompt_used,
         mutation_note=mutation_note,
         semantic_similarity=similarity,
         generation_iteration=iteration,
         is_recurrent=True,
+        provider_name=img_result.provider_name,
     )
 
     return RecurrenceStep(
