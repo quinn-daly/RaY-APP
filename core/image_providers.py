@@ -52,11 +52,17 @@ class ImageResult:
     """
     Unified return object from any image provider.
     recurrence.py reads these fields to build the ImageRecord lineage entry.
+
+    prompt_used   — the exact string sent to the API (may be shaped and/or
+                    revised by the model, e.g. DALL-E 3 revised_prompt).
+    raw_prompt    — the unshaped recurrent text before provider formatting.
+                    Equals prompt_used for sim; differs for live providers.
     """
     image_path:         str               # relative path where the file was saved
     provider_name:      str               # e.g. "gemini_flash_image"
     model_name:         str               # specific model/version used
-    prompt_used:        str               # exact prompt sent (may be revised by API)
+    prompt_used:        str               # shaped + possibly model-revised prompt
+    raw_prompt:         str = ""          # unshaped recurrent text (lineage anchor)
     generation_time_ms: int = 0           # wall-clock generation time in milliseconds
     metadata:           Dict[str, Any] = field(default_factory=dict)
 
@@ -132,6 +138,132 @@ def get_provider(name: str) -> ImageProvider:
 
 def available_providers() -> List[str]:
     return list(_REGISTRY.keys())
+
+
+# ---------------------------------------------------------------------------
+# Prompt shaping
+# ---------------------------------------------------------------------------
+# Each provider responds best to a different prompt style:
+#
+#   sim                 Pass through unchanged — no rendering model to guide.
+#
+#   replicate_flux      Flux models are trained on short, dense image-tag
+#                       notation. Long discursive sentences degrade output.
+#                       Shape: extract noun phrases and material/quality terms,
+#                       join as a comma-separated tag string, append style
+#                       suffixes for photorealistic architectural output.
+#
+#   gemini_flash_image  Imagen models parse natural-language scene descriptions
+#                       well but are sensitive to ambiguity and abstraction.
+#                       Shape: rewrite as a single clear scene sentence with
+#                       explicit subject/setting, material qualities, lighting
+#                       condition, and camera framing. Cap at ~200 tokens.
+#
+#   openai_gpt_image    DALL-E 3 has the strongest instruction-following of
+#                       any provider. Pass the full architectural text with a
+#                       rendering instruction prefix and explicit style anchors.
+#                       The model handles complex spatial language natively.
+#
+# The raw recurrent prompt is always preserved in ImageResult.metadata so
+# lineage tracking is never broken by shaping.
+
+import re as _re
+
+
+def _extract_noun_phrases(text: str) -> List[str]:
+    """
+    Lightweight heuristic extraction of noun-like phrases for Flux tag notation.
+    Keeps capitalized compounds, hyphenated adjective-nouns, and domain terms.
+    Not a full NLP parse — good enough for architectural vocabulary.
+    """
+    # Split on sentence boundaries, then on commas/semicolons
+    chunks = _re.split(r"[.;,]", text)
+    tags: List[str] = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        # Take the first 6 words of each clause as a candidate tag
+        words = chunk.split()
+        phrase = " ".join(words[:6]).rstrip(".,;:")
+        if len(phrase) > 4:
+            tags.append(phrase)
+    return tags[:12]   # cap at 12 tags to stay under Flux's preferred range
+
+
+def shape_prompt(raw: str, provider_name: str, **kwargs: Any) -> str:
+    """
+    Return a provider-optimised version of the raw recurrent prompt text.
+    Conceptual content and lineage vocabulary are preserved; only the
+    surface form changes to match what each model responds to best.
+
+    Args:
+        raw:           The unshaped text produced by the recurrence mutation engine.
+        provider_name: One of the registered provider names.
+        **kwargs:      Optional context: specificity (str), lens_name (str).
+                       Used to sharpen the scene framing for image providers.
+
+    Returns:
+        The shaped prompt string. Identical to raw for 'sim' and unknown providers.
+    """
+    if provider_name == "sim":
+        return raw
+
+    specificity = kwargs.get("specificity", "medium")
+    lens_name   = kwargs.get("lens_name", "architectural")
+
+    # ── replicate_flux: tag-notation ─────────────────────────────────────────
+    if provider_name in ("replicate_flux",):
+        tags = _extract_noun_phrases(raw)
+        quality_suffix = (
+            "photorealistic architectural render, sharp detail, natural light"
+            if specificity == "high"
+            else "architectural photography, ambient light, high detail"
+            if specificity == "medium"
+            else "architectural concept, soft light, minimal"
+        )
+        shaped = ", ".join(tags) + ", " + quality_suffix
+        return shaped[:800]    # Flux effective prompt limit
+
+    # ── gemini_flash_image: single clear scene sentence ──────────────────────
+    if provider_name in ("gemini_flash_image", "gemini_pro_image"):
+        # Strip the raw text to at most two sentences; prepend scene framing
+        sentences = [s.strip() for s in _re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+        core = " ".join(sentences[:2])
+        # Cap length — Imagen degrades beyond ~180 tokens
+        if len(core) > 900:
+            core = core[:900].rsplit(" ", 1)[0]
+        scene_prefix = f"Architectural scene — {lens_name} perspective: "
+        lighting = (
+            "dramatic directional light, photorealistic detail."
+            if specificity == "high"
+            else "soft natural light, detailed."
+            if specificity == "medium"
+            else "even ambient light, clean composition."
+        )
+        shaped = scene_prefix + core + " " + lighting
+        return shaped
+
+    # ── openai_gpt_image: full text with rendering instruction prefix ─────────
+    if provider_name == "openai_gpt_image":
+        render_prefix = (
+            "Render as a high-fidelity architectural photograph. "
+            "Photorealistic, no text, no watermarks. "
+        )
+        style_suffix = (
+            " Ultra-detailed materiality. Professional architectural photography."
+            if specificity == "high"
+            else " Strong sense of space and light. Architectural quality."
+            if specificity == "medium"
+            else " Clean composition, legible spatial concept."
+        )
+        # DALL-E 3 hard limit is 4000 chars; leave room for affixes
+        core = raw[:3800].rsplit(" ", 1)[0] if len(raw) > 3800 else raw
+        shaped = render_prefix + core + style_suffix
+        return shaped[:4000]
+
+    # Unknown provider — pass through unchanged
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -235,12 +367,13 @@ class GeminiFlashImageProvider(ImageProvider):
                 "GOOGLE_API_KEY environment variable is not set."
             )
 
+        shaped = shape_prompt(prompt, self.name, **kwargs)
         client = genai.Client(api_key=api_key)
         t0 = time.monotonic()
 
         response = client.models.generate_images(
             model=self.model,
-            prompt=prompt,
+            prompt=shaped,
             config=gtypes.GenerateImagesConfig(
                 number_of_images=1,
                 aspect_ratio="1:1",
@@ -257,8 +390,10 @@ class GeminiFlashImageProvider(ImageProvider):
             image_path=str(output_path),
             provider_name=self.name,
             model_name=self.model,
-            prompt_used=prompt,
+            prompt_used=shaped,
+            raw_prompt=prompt,
             generation_time_ms=elapsed_ms,
+            metadata={"raw_prompt": prompt},
         )
 
 
@@ -312,12 +447,13 @@ class GeminiProImageProvider(ImageProvider):
                 "GOOGLE_API_KEY environment variable is not set."
             )
 
+        shaped = shape_prompt(prompt, self.name, **kwargs)
         client = genai.Client(api_key=api_key)
         t0 = time.monotonic()
 
         response = client.models.generate_images(
             model=self.model,
-            prompt=prompt,
+            prompt=shaped,
             config=gtypes.GenerateImagesConfig(
                 number_of_images=1,
                 aspect_ratio="1:1",
@@ -334,8 +470,10 @@ class GeminiProImageProvider(ImageProvider):
             image_path=str(output_path),
             provider_name=self.name,
             model_name=self.model,
-            prompt_used=prompt,
+            prompt_used=shaped,
+            raw_prompt=prompt,
             generation_time_ms=elapsed_ms,
+            metadata={"raw_prompt": prompt},
         )
 
 
@@ -396,12 +534,13 @@ class OpenAIGPTImageProvider(ImageProvider):
 
         import base64
 
-        client = _openai.OpenAI(api_key=api_key)
-        t0 = time.monotonic()
+        shaped  = shape_prompt(prompt, self.name, **kwargs)
+        client  = _openai.OpenAI(api_key=api_key)
+        t0      = time.monotonic()
 
         response = client.images.generate(
             model=self.model,
-            prompt=prompt[:4000],         # DALL-E 3 hard limit
+            prompt=shaped,                # already capped to 4000 chars by shape_prompt
             size="1024x1024",
             quality="standard",
             response_format="b64_json",
@@ -414,15 +553,16 @@ class OpenAIGPTImageProvider(ImageProvider):
         output_path.write_bytes(image_bytes)
 
         # DALL-E 3 often revises the prompt; capture what was actually used
-        revised = getattr(response.data[0], "revised_prompt", prompt)
+        revised = getattr(response.data[0], "revised_prompt", shaped)
 
         return ImageResult(
             image_path=str(output_path),
             provider_name=self.name,
             model_name=self.model,
             prompt_used=revised,
+            raw_prompt=prompt,
             generation_time_ms=elapsed_ms,
-            metadata={"original_prompt": prompt},
+            metadata={"shaped_prompt": shaped, "raw_prompt": prompt},
         )
 
 
@@ -478,11 +618,12 @@ class ReplicateFluxProvider(ImageProvider):
 
         import urllib.request
 
-        t0 = time.monotonic()
+        shaped = shape_prompt(prompt, self.name, **kwargs)
+        t0     = time.monotonic()
         output = _replicate.run(
             self.model,
             input={
-                "prompt": prompt,
+                "prompt": shaped,
                 "num_outputs": 1,
                 "output_format": "png",
                 "num_inference_steps": 4,  # Flux Schnell sweet spot
@@ -499,9 +640,10 @@ class ReplicateFluxProvider(ImageProvider):
             image_path=str(output_path),
             provider_name=self.name,
             model_name=self.model,
-            prompt_used=prompt,
+            prompt_used=shaped,
+            raw_prompt=prompt,
             generation_time_ms=elapsed_ms,
-            metadata={"source_url": image_url},
+            metadata={"raw_prompt": prompt, "source_url": image_url},
         )
 
 

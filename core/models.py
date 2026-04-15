@@ -80,6 +80,8 @@ class ImageRecord:
     generation_iteration: int   = 0    # global recurrence counter (0 = original 4 vars)
     is_recurrent:         bool  = False
     provider_name:        str   = ""   # image provider used (e.g. "sim", "replicate_flux")
+    raw_prompt_text:      str   = ""   # unshaped recurrent prompt before provider formatting
+    generation_time_ms:   int   = 0    # wall-clock ms for this image event
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -103,4 +105,6 @@ class ImageRecord:
             generation_iteration=d.get("generation_iteration", 0),
             is_recurrent=d.get("is_recurrent", False),
             provider_name=d.get("provider_name", ""),
+            raw_prompt_text=d.get("raw_prompt_text", ""),
+            generation_time_ms=d.get("generation_time_ms", 0),
         )

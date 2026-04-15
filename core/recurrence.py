@@ -256,6 +256,8 @@ def run_recurrence_step(
         generation_iteration=iteration,
         is_recurrent=True,
         provider_name=img_result.provider_name,
+        raw_prompt_text=img_result.raw_prompt or mutated_text,
+        generation_time_ms=img_result.generation_time_ms,
     )
 
     return RecurrenceStep(

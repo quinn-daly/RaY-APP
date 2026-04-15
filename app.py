@@ -74,11 +74,14 @@ def _init_state() -> None:
         # per-strand immutable origin text: {prompt_id → original Phase-1 text}
         "original_prompt_texts":   {},
         # ── recurrence pacing + provider ────────────────────────────────────
-        "recurrence_provider":         "sim",   # provider name string
-        "recurrence_interval":         2,       # seconds between auto steps
-        "recurrence_display_cadence":  1,       # re-render every N steps
-        "recurrence_logging_cadence":  5,       # save to disk every N steps
-        "recurrence_gen_since_save":   0,       # steps since last save
+        "recurrence_provider":              "sim",   # provider name string
+        "recurrence_interval":             2,        # seconds between auto steps
+        "recurrence_steps_per_cycle":      1,        # steps generated before each rerun
+        "recurrence_logging_cadence":      5,        # save to disk every N steps
+        "recurrence_gen_since_save":       0,        # steps since last save
+        "recurrence_highlight_major":      False,    # only rerender on major mutations
+        "recurrence_major_threshold":      0.15,     # similarity drop to qualify as major
+        "recurrence_last_shown_sim":       {},       # {prompt_id: last similarity shown}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -324,21 +327,23 @@ def _render_recurrence_section() -> None:
                     max_value=60,
                     value=st.session_state.get("recurrence_interval", 2),
                     step=1,
-                    help="Seconds to wait between auto-advance steps.",
+                    help="Seconds to sleep between each UI rerun. "
+                         "Set to 0 for maximum throughput.",
                     key="rec_interval_idle",
                 )
                 st.session_state.recurrence_interval = interval
             with p_col2:
-                display_cadence = st.number_input(
-                    "Display cadence (steps)",
+                steps_per_cycle = st.number_input(
+                    "Steps per cycle (max concurrent)",
                     min_value=1,
-                    max_value=20,
-                    value=st.session_state.get("recurrence_display_cadence", 1),
+                    max_value=12,
+                    value=st.session_state.get("recurrence_steps_per_cycle", 1),
                     step=1,
-                    help="Re-render the UI every N steps.",
-                    key="rec_display_cadence_idle",
+                    help="How many generation steps to run before re-rendering the UI. "
+                         "Higher values increase throughput; lower gives finer display resolution.",
+                    key="rec_steps_per_cycle_idle",
                 )
-                st.session_state.recurrence_display_cadence = display_cadence
+                st.session_state.recurrence_steps_per_cycle = steps_per_cycle
             with p_col3:
                 logging_cadence = st.number_input(
                     "Save cadence (steps)",
@@ -350,6 +355,33 @@ def _render_recurrence_section() -> None:
                     key="rec_logging_cadence_idle",
                 )
                 st.session_state.recurrence_logging_cadence = logging_cadence
+
+            # Highlight major mutations only
+            st.divider()
+            col_hm, col_thresh = st.columns([2, 1])
+            with col_hm:
+                highlight = st.toggle(
+                    "Highlight major mutations only",
+                    value=st.session_state.get("recurrence_highlight_major", False),
+                    key="rec_highlight_major_idle",
+                    help="When enabled, the image feed and strand state panel only update "
+                         "when a mutation drops similarity by more than the threshold below. "
+                         "Generation continues at full pace; display is filtered.",
+                )
+                st.session_state.recurrence_highlight_major = highlight
+            with col_thresh:
+                threshold = st.number_input(
+                    "Major mutation threshold",
+                    min_value=0.05,
+                    max_value=0.50,
+                    value=st.session_state.get("recurrence_major_threshold", 0.15),
+                    step=0.05,
+                    format="%.2f",
+                    key="rec_major_threshold_idle",
+                    disabled=not st.session_state.get("recurrence_highlight_major", False),
+                    help="Similarity drop below the last-shown value that counts as a major mutation.",
+                )
+                st.session_state.recurrence_major_threshold = threshold
         return
 
     # ── Running controls ──────────────────────────────────────────────────────
@@ -454,18 +486,40 @@ def _render_recurrence_section() -> None:
                     + (f"  ·  `{rec.provider_name}`" if rec.provider_name else "")
                 )
 
-    # ── Auto-advance: generate one step then rerun ────────────────────────────
-    # Streamlit's rerun is the loop clock. Each execution renders state, generates
-    # one step (or a display_cadence batch), sleeps for the configured interval,
-    # then triggers the next execution. Pause / Finalize break the cycle.
+    # ── Auto-advance: generate N steps then rerun ────────────────────────────
+    # Streamlit's rerun is the loop clock. Each execution renders current state,
+    # generates recurrence_steps_per_cycle steps, then triggers the next execution.
+    # When highlight_major is on, a rerun is forced immediately on any major
+    # mutation so the user sees it; otherwise reruns happen after every cycle.
     if not st.session_state.recurrence_paused and _prompts_included():
-        display_cadence = max(1, st.session_state.get("recurrence_display_cadence", 1))
+        steps_per_cycle = max(1, st.session_state.get("recurrence_steps_per_cycle", 1))
         interval        = st.session_state.get("recurrence_interval", 2)
-        for _ in range(display_cadence):
+        highlight_major = st.session_state.get("recurrence_highlight_major", False)
+        threshold       = st.session_state.get("recurrence_major_threshold", 0.15)
+        last_shown      = st.session_state.get("recurrence_last_shown_sim", {})
+
+        force_rerun = False
+        for _ in range(steps_per_cycle):
             _run_one_recurrence_step()
             if st.session_state.recurrence_paused:
                 break
-        if interval > 0:
+            if highlight_major:
+                # Check whether the latest step is a major mutation
+                last_rec = next(
+                    (r for r in reversed(st.session_state.image_records) if r.is_recurrent),
+                    None,
+                )
+                if last_rec:
+                    pid = last_rec.source_prompt_id
+                    prev_sim = last_shown.get(pid, 1.0)
+                    drop = prev_sim - last_rec.semantic_similarity
+                    if drop >= threshold:
+                        last_shown[pid] = last_rec.semantic_similarity
+                        st.session_state.recurrence_last_shown_sim = last_shown
+                        force_rerun = True
+                        break
+
+        if interval > 0 and not force_rerun:
             time.sleep(interval)
         st.rerun()
 
@@ -1183,7 +1237,7 @@ def render_phase3() -> None:
         "images_with_notes": with_notes,
     })
 
-    # ── Section 5 — Recurrence Drift Analysis (only when recurrent data exists) ──
+    # ── Section 5 — Recurrence analysis (only when recurrent data exists) ──────
     recurrent_recs = [r for r in records if r.is_recurrent]
     if recurrent_recs:
         st.divider()
@@ -1287,34 +1341,107 @@ def _render_vocab_by_specificity(vocab: dict, total_tokens: int) -> None:
 
 def _render_provider_breakdown(recurrent_records: List[ImageRecord]) -> None:
     """
-    Show a per-provider image count table beneath the vocabulary comparison.
-    Logged for every recurrent image event via ImageRecord.provider_name.
+    Full provider comparison: summary table, per-provider similarity trends,
+    prompt shaping diff, and generation time distribution.
+
+    Answers three research questions:
+      1. Fast research  — which provider gives usable imagery at lowest cost/time?
+      2. Live recurrence — which provider tracks mutation drift most faithfully?
+      3. Curated exports — which provider renders architectural language best?
     """
-    from collections import Counter as _Counter
-    counts = _Counter(
-        r.provider_name or "unknown" for r in recurrent_records
-    )
-    if not counts:
+    from collections import defaultdict
+
+    providers_used = sorted({r.provider_name or "unknown" for r in recurrent_records})
+    if not providers_used:
         return
 
     st.divider()
-    st.markdown("**Provider log**")
-    st.caption("Images generated per provider across all recurrence iterations.")
+    st.markdown("**Provider Comparison**")
+    st.caption(
+        "Aggregated across all recurrence iterations. "
+        "Use this to evaluate which provider best fits fast research, "
+        "live recurrence, and curated exports."
+    )
 
-    rows = [
-        {
-            "provider": name,
-            "tier": provider_tier(name),
-            "images": count,
-            "pct": f"{count / len(recurrent_records) * 100:.1f}%",
-        }
-        for name, count in counts.most_common()
-    ]
+    # ── Summary table ─────────────────────────────────────────────────────────
+    total = len(recurrent_records)
+    rows = []
+    for pname in providers_used:
+        recs = [r for r in recurrent_records if (r.provider_name or "unknown") == pname]
+        sims  = [r.semantic_similarity for r in recs]
+        times = [r.generation_time_ms  for r in recs if r.generation_time_ms > 0]
+        rows.append({
+            "provider":     pname,
+            "tier":         provider_tier(pname),
+            "images":       len(recs),
+            "% of run":     f"{len(recs) / total * 100:.1f}%",
+            "avg similarity": f"{sum(sims)/len(sims):.3f}" if sims else "—",
+            "min similarity": f"{min(sims):.3f}"           if sims else "—",
+            "avg time (ms)":  f"{sum(times)//len(times)}"  if times else "—",
+        })
     st.dataframe(
         pd.DataFrame(rows).set_index("provider"),
         use_container_width=True,
-        height=min(60 + len(rows) * 35, 280),
+        height=min(80 + len(rows) * 35, 320),
     )
+
+    # ── Similarity drift per provider ─────────────────────────────────────────
+    by_iter: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for r in recurrent_records:
+        pname = r.provider_name or "unknown"
+        by_iter[pname][r.generation_iteration].append(r.semantic_similarity)
+
+    if len(providers_used) > 1 or any(len(v) > 1 for v in by_iter.values()):
+        st.markdown("**Similarity drift by provider**")
+        st.caption(
+            "Jaccard similarity to original Phase-1 text at each iteration. "
+            "Steeper decline = faster conceptual drift from origin."
+        )
+        chart_rows = []
+        for pname, iter_map in by_iter.items():
+            for it, sims in sorted(iter_map.items()):
+                chart_rows.append({
+                    "iteration": it,
+                    "provider":  pname,
+                    "avg_sim":   round(sum(sims) / len(sims), 3),
+                })
+        if chart_rows:
+            df_chart = pd.DataFrame(chart_rows)
+            pivot = df_chart.pivot(index="iteration", columns="provider", values="avg_sim")
+            st.line_chart(pivot, height=220)
+
+    # ── Prompt shaping diff (sample) ──────────────────────────────────────────
+    # Show one example per provider where raw != shaped, so the user can
+    # evaluate how the shaping transforms the recurrent text.
+    shaped_examples = []
+    for pname in providers_used:
+        if pname == "sim":
+            continue
+        recs_with_raw = [
+            r for r in recurrent_records
+            if (r.provider_name or "unknown") == pname
+            and r.raw_prompt_text
+            and r.raw_prompt_text != r.current_prompt_text
+        ]
+        if recs_with_raw:
+            ex = recs_with_raw[0]
+            shaped_examples.append((pname, ex.raw_prompt_text, ex.current_prompt_text))
+
+    if shaped_examples:
+        st.markdown("**Prompt shaping — example per provider**")
+        st.caption(
+            "Raw: unshaped recurrent text from the mutation engine.  \n"
+            "Shaped: what was actually sent to the API."
+        )
+        for pname, raw, shaped in shaped_examples:
+            with st.expander(f"`{pname}` — shaping example", expanded=False):
+                col_r, col_s = st.columns(2)
+                with col_r:
+                    st.markdown("**Raw (recurrent)**")
+                    st.text(raw[:600] + ("…" if len(raw) > 600 else ""))
+                with col_s:
+                    st.markdown("**Shaped (sent to API)**")
+                    st.text(shaped[:600] + ("…" if len(shaped) > 600 else ""))
 
 
 def _render_vocab_recurrence(
