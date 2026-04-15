@@ -25,7 +25,10 @@ from core.image_sim import generate_placeholder_image
 from core.vocab import analyze_vocab, analyze_drift, top_n
 from core import storage
 from core.recurrence import run_recurrence_step, compute_similarity
-from core.image_providers import available_providers, get_provider, ProviderError
+from core.image_providers import (
+    available_providers, get_provider, ProviderError,
+    ROLLOUT_PROVIDERS, provider_label, provider_tier,
+)
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -275,7 +278,7 @@ def _render_recurrence_section() -> None:
             "The seminal intention persists; its refractions evolve."
         )
 
-        col_btn, col_intensity, col_provider = st.columns([2, 2, 3])
+        col_btn, col_intensity = st.columns([2, 2])
         with col_btn:
             if st.button("Start Recurrence", type="primary", key="rec_start"):
                 st.session_state.recurrence_running = True
@@ -289,18 +292,27 @@ def _render_recurrence_section() -> None:
                 key="rec_intensity_idle",
             )
             st.session_state.recurrence_intensity = intensity
-        with col_provider:
-            providers = available_providers()
-            current_p = st.session_state.get("recurrence_provider", "sim")
-            if current_p not in providers:
-                current_p = "sim"
-            chosen = st.selectbox(
-                "Image provider",
-                options=providers,
-                index=providers.index(current_p),
-                key="rec_provider_idle",
-            )
-            st.session_state.recurrence_provider = chosen
+
+        # Provider selector — rollout order
+        st.markdown("**Image provider**")
+        st.caption(
+            "Tier 1 (sim) is free and instant. "
+            "Move to Tier 2 (replicate_flux) for real imagery in research runs. "
+            "Tier 3 (gemini_flash_image) adds a second live provider for comparison. "
+            "Tier 4 (openai_gpt_image) is reserved for curated final runs."
+        )
+        current_p = st.session_state.get("recurrence_provider", "sim")
+        if current_p not in ROLLOUT_PROVIDERS:
+            current_p = "sim"
+        tier_labels = [provider_label(p) for p in ROLLOUT_PROVIDERS]
+        chosen_label = st.radio(
+            "Select provider",
+            options=tier_labels,
+            index=ROLLOUT_PROVIDERS.index(current_p),
+            key="rec_provider_idle",
+            label_visibility="collapsed",
+        )
+        st.session_state.recurrence_provider = ROLLOUT_PROVIDERS[tier_labels.index(chosen_label)]
 
         # Pacing controls
         with st.expander("Pacing controls", expanded=False):
@@ -341,7 +353,7 @@ def _render_recurrence_section() -> None:
         return
 
     # ── Running controls ──────────────────────────────────────────────────────
-    col_pause, col_stop, col_anchor, col_intensity = st.columns([1, 1, 2, 2])
+    col_pause, col_stop, col_anchor, col_intensity, col_provider_run = st.columns([1, 1, 2, 2, 3])
 
     with col_pause:
         if st.session_state.recurrence_paused:
@@ -373,6 +385,20 @@ def _render_recurrence_section() -> None:
             key="rec_intensity_running",
         )
         st.session_state.recurrence_intensity = intensity
+
+    with col_provider_run:
+        current_p_run = st.session_state.get("recurrence_provider", "sim")
+        if current_p_run not in ROLLOUT_PROVIDERS:
+            current_p_run = "sim"
+        tier_labels_run = [provider_label(p) for p in ROLLOUT_PROVIDERS]
+        chosen_run = st.selectbox(
+            "Switch provider",
+            options=tier_labels_run,
+            index=ROLLOUT_PROVIDERS.index(current_p_run),
+            key="rec_provider_running",
+            help="Takes effect on the next generation step.",
+        )
+        st.session_state.recurrence_provider = ROLLOUT_PROVIDERS[tier_labels_run.index(chosen_run)]
 
     # ── Status line ───────────────────────────────────────────────────────────
     recurrent_count = sum(1 for r in st.session_state.image_records if r.is_recurrent)
@@ -423,7 +449,10 @@ def _render_recurrence_section() -> None:
                     st.warning(f"Missing: {img_path.name}")
                 st.caption(f"`{rec.source_prompt_id}` · iter {rec.generation_iteration}")
                 st.caption(f"*{rec.mutation_note}*")
-                st.caption(f"similarity: `{rec.semantic_similarity:.2f}`")
+                st.caption(
+                    f"similarity: `{rec.semantic_similarity:.2f}`"
+                    + (f"  ·  `{rec.provider_name}`" if rec.provider_name else "")
+                )
 
     # ── Auto-advance: generate one step then rerun ────────────────────────────
     # Streamlit's rerun is the loop clock. Each execution renders state, generates
@@ -1091,6 +1120,7 @@ def render_phase3() -> None:
     if recurrent_recs:
         with tabs[3]:
             _render_vocab_recurrence(vocab, recurrent_recs, total_tokens)
+            _render_provider_breakdown(recurrent_recs)
 
     st.divider()
 
@@ -1158,9 +1188,18 @@ def render_phase3() -> None:
     if recurrent_recs:
         st.divider()
         st.subheader("Recurrence Drift Analysis")
+        # Build provider summary for the caption
+        from collections import Counter as _Counter
+        provider_counts = _Counter(
+            r.provider_name for r in recurrent_recs if r.provider_name
+        )
+        provider_summary = "  ·  ".join(
+            f"`{p}` ×{n}" for p, n in provider_counts.most_common()
+        ) or "`sim`"
         st.caption(
             f"{len(recurrent_recs)} recurrent image{'s' if len(recurrent_recs) != 1 else ''} "
             f"across {st.session_state.recurrence_iteration} iterations  ·  "
+            f"providers: {provider_summary}  ·  "
             "Tracks how vocabulary transforms as the seminal intention metabolises over time."
         )
         drift = analyze_drift(prompts, recurrent_recs, cfg.seminal_intention)
@@ -1244,6 +1283,38 @@ def _render_vocab_by_specificity(vocab: dict, total_tokens: int) -> None:
             st.markdown(f"**{spec.capitalize()} specificity**")
             df = _vocab_table(counter, 10, spec_total)
             st.dataframe(df, use_container_width=True, height=300)
+
+
+def _render_provider_breakdown(recurrent_records: List[ImageRecord]) -> None:
+    """
+    Show a per-provider image count table beneath the vocabulary comparison.
+    Logged for every recurrent image event via ImageRecord.provider_name.
+    """
+    from collections import Counter as _Counter
+    counts = _Counter(
+        r.provider_name or "unknown" for r in recurrent_records
+    )
+    if not counts:
+        return
+
+    st.divider()
+    st.markdown("**Provider log**")
+    st.caption("Images generated per provider across all recurrence iterations.")
+
+    rows = [
+        {
+            "provider": name,
+            "tier": provider_tier(name),
+            "images": count,
+            "pct": f"{count / len(recurrent_records) * 100:.1f}%",
+        }
+        for name, count in counts.most_common()
+    ]
+    st.dataframe(
+        pd.DataFrame(rows).set_index("provider"),
+        use_container_width=True,
+        height=min(60 + len(rows) * 35, 280),
+    )
 
 
 def _render_vocab_recurrence(
