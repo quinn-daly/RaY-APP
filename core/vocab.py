@@ -152,3 +152,80 @@ def analyze_vocab(
 def top_n(counter: Counter, n: int = 20) -> List[tuple]:
     """Return top-n (word, count) pairs."""
     return counter.most_common(n)
+
+
+# ---------------------------------------------------------------------------
+# Drift analysis (recurrence)
+# ---------------------------------------------------------------------------
+
+def analyze_drift(
+    original_prompts: List[Prompt],
+    recurrent_records: List["ImageRecord"],
+    seminal_intention: str,
+) -> Dict:
+    """
+    Compare vocabulary between the original refracted prompts and the
+    evolving recurrent mutations to surface how language is transforming.
+
+    Returns:
+        anchor_terms    — tokens from the seminal intention still present in recurrent prompts
+        emerging_terms  — new tokens in recurrent prompts absent from original prompts
+        fading_terms    — tokens prominent in originals but diminishing in recurrents
+        original_freq   — Counter of original prompt tokens
+        recurrent_freq  — Counter of recurrent prompt tokens (from current_prompt_text)
+        drift_over_time — list of {iteration, avg_similarity} for charting
+    """
+    intention_tokens = set(tokenize(seminal_intention))
+
+    # Original vocabulary — from the 12 Phase-1 prompts
+    original_freq: Counter = Counter()
+    for p in [p for p in original_prompts if not p.excluded]:
+        original_freq.update(tokenize(p.text))
+
+    # Recurrent vocabulary — from current_prompt_text of each recurrent ImageRecord
+    # Deduplicate by text to avoid counting the same mutation state multiple times
+    recurrent_freq: Counter = Counter()
+    seen_texts: set[str] = set()
+    for rec in recurrent_records:
+        text = rec.current_prompt_text or rec.parent_prompt_text
+        if text and text not in seen_texts:
+            recurrent_freq.update(tokenize(text))
+            seen_texts.add(text)
+
+    original_set  = set(original_freq.keys())
+    recurrent_set = set(recurrent_freq.keys())
+
+    # Anchor: from the seminal intention and still present in recurrent prompts
+    anchor_terms = sorted(intention_tokens & recurrent_set)
+
+    # Emerging: appear in recurrent prompts but were absent from original prompts
+    emerging_raw = recurrent_set - original_set
+    emerging_terms = Counter({w: recurrent_freq[w] for w in emerging_raw}).most_common(20)
+
+    # Fading: present in originals but significantly reduced in recurrents
+    # Threshold: recurrent count < 30% of original count
+    fading_terms = sorted(
+        w for w in original_set
+        if original_freq[w] > 0
+        and recurrent_freq.get(w, 0) < original_freq[w] * 0.30
+    )[:20]
+
+    # Drift over time: group ImageRecords by generation_iteration
+    # Each group gives the average semantic_similarity for that iteration round
+    by_iteration: Dict[int, list[float]] = {}
+    for rec in recurrent_records:
+        by_iteration.setdefault(rec.generation_iteration, []).append(rec.semantic_similarity)
+
+    drift_over_time = [
+        {"iteration": it, "avg_similarity": round(sum(sims) / len(sims), 3)}
+        for it, sims in sorted(by_iteration.items())
+    ]
+
+    return {
+        "anchor_terms":    anchor_terms,
+        "emerging_terms":  emerging_terms,
+        "fading_terms":    fading_terms,
+        "original_freq":   original_freq,
+        "recurrent_freq":  recurrent_freq,
+        "drift_over_time": drift_over_time,
+    }

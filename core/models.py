@@ -71,6 +71,14 @@ class ImageRecord:
     pinned: bool = False
     created_at: str = ""
     user_note: Optional[str] = None
+    # ── Lineage fields (recurrence) ──────────────────────────────────────────
+    # All default to neutral values so existing records remain valid.
+    parent_prompt_text:   str   = ""    # text fed INTO this mutation step
+    current_prompt_text:  str   = ""    # text that generated this image (post-mutation)
+    mutation_note:        str   = ""    # human-readable description of the mutation
+    semantic_similarity:  float = 1.0  # Jaccard vs original Phase-1 prompt text
+    generation_iteration: int   = 0    # global recurrence counter (0 = original 4 vars)
+    is_recurrent:         bool  = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -86,4 +94,11 @@ class ImageRecord:
             pinned=d.get("pinned", False),
             created_at=d.get("created_at", ""),
             user_note=d.get("user_note"),
+            # Lineage — all optional so old image_log.json files load cleanly
+            parent_prompt_text=d.get("parent_prompt_text", ""),
+            current_prompt_text=d.get("current_prompt_text", ""),
+            mutation_note=d.get("mutation_note", ""),
+            semantic_similarity=d.get("semantic_similarity", 1.0),
+            generation_iteration=d.get("generation_iteration", 0),
+            is_recurrent=d.get("is_recurrent", False),
         )

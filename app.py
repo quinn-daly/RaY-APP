@@ -21,8 +21,9 @@ import streamlit as st
 from core.models import ImageRecord, Prompt, RunConfig
 from core.prompt_sim import DEFAULT_LENSES, generate_prompts
 from core.image_sim import generate_placeholder_image
-from core.vocab import analyze_vocab, top_n
+from core.vocab import analyze_vocab, analyze_drift, top_n
 from core import storage
+from core.recurrence import run_recurrence_step, compute_similarity
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -57,6 +58,16 @@ def _init_state() -> None:
         "p2_focused_idx": 0,
         # autosave feedback
         "_last_saved": None,
+        # ── recurrence mode ──────────────────────────────────────────────────
+        "recurrence_running":      False,
+        "recurrence_paused":       False,
+        "recurrence_intensity":    "medium",
+        "recurrence_iteration":    0,
+        "recurrence_strand_idx":   0,
+        # per-strand evolving text: {prompt_id → current text}
+        "recurrent_prompt_states": {},
+        # per-strand immutable origin text: {prompt_id → original Phase-1 text}
+        "original_prompt_texts":   {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -154,6 +165,184 @@ def _do_generate_images(prompt: Prompt, variation_index: int, note: str) -> Imag
         created_at=datetime.now().isoformat(timespec="seconds"),
         user_note=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Recurrence engine — step execution and UI
+# ---------------------------------------------------------------------------
+
+def _run_one_recurrence_step() -> None:
+    """
+    Execute one recurrence cycle:
+      1. Select the next prompt strand (round-robin through included prompts)
+      2. Retrieve or initialise its current evolving text
+      3. Delegate to core/recurrence.py for mutation + image generation
+      4. Persist the new ImageRecord and advance counters
+    """
+    included = _prompts_included()
+    if not included:
+        return
+
+    idx    = st.session_state.recurrence_strand_idx % len(included)
+    prompt = included[idx]
+
+    # Snapshot the original text the first time this strand enters recurrence
+    if prompt.prompt_id not in st.session_state.original_prompt_texts:
+        st.session_state.original_prompt_texts[prompt.prompt_id] = prompt.text
+
+    original_text = st.session_state.original_prompt_texts[prompt.prompt_id]
+    current_text  = st.session_state.recurrent_prompt_states.get(
+        prompt.prompt_id, prompt.text
+    )
+
+    step = run_recurrence_step(
+        prompt=prompt,
+        original_prompt_text=original_text,
+        seminal_intention=st.session_state.run_config.seminal_intention,
+        iteration=st.session_state.recurrence_iteration,
+        intensity=st.session_state.recurrence_intensity,
+        current_text=current_text,
+        run_id=st.session_state.run_id,
+    )
+
+    # Advance the strand's evolving text
+    st.session_state.recurrent_prompt_states[prompt.prompt_id] = step.mutated_text
+
+    # Persist
+    st.session_state.image_records.append(step.image_record)
+    _save_records()
+
+    # Advance global counters
+    st.session_state.recurrence_iteration  += 1
+    st.session_state.recurrence_strand_idx  = (idx + 1) % len(included)
+
+
+def _render_recurrence_section() -> None:
+    """
+    Recurrence mode UI — appended to the bottom of Phase 2.
+
+    When not running: exposes a Start button and intensity selector.
+    When running:     shows live controls, evolving strand states,
+                      a recent-image feed, and auto-advances on each rerun.
+
+    The auto-advance pattern (generate one step → st.rerun) uses Streamlit's
+    own rerun mechanism as the loop clock. The user observes the system evolving
+    and intervenes via Pause / Re-anchor / Stop when necessary.
+    """
+    st.divider()
+    st.subheader("⟳ Recurrence Mode")
+
+    if not st.session_state.recurrence_running:
+        st.caption(
+            "Transform the prompt strands continuously. "
+            "The seminal intention persists; its refractions evolve."
+        )
+        col_btn, col_intensity, _ = st.columns([2, 2, 3])
+        with col_btn:
+            if st.button("Start Recurrence", type="primary", key="rec_start"):
+                st.session_state.recurrence_running = True
+                st.session_state.recurrence_paused  = False
+                st.rerun()
+        with col_intensity:
+            intensity = st.select_slider(
+                "Mutation intensity",
+                options=["low", "medium", "high"],
+                value=st.session_state.recurrence_intensity,
+                key="rec_intensity_idle",
+            )
+            st.session_state.recurrence_intensity = intensity
+        return
+
+    # ── Running controls ──────────────────────────────────────────────────────
+    col_pause, col_stop, col_anchor, col_intensity = st.columns([1, 1, 2, 2])
+
+    with col_pause:
+        if st.session_state.recurrence_paused:
+            if st.button("▶ Resume", key="rec_resume"):
+                st.session_state.recurrence_paused = False
+                st.rerun()
+        else:
+            if st.button("⏸ Pause", key="rec_pause"):
+                st.session_state.recurrence_paused = True
+                st.rerun()
+
+    with col_stop:
+        if st.button("⏹ Finalize", key="rec_stop"):
+            st.session_state.recurrence_running = False
+            st.session_state.recurrence_paused  = False
+            st.rerun()
+
+    with col_anchor:
+        if st.button("↺ Re-anchor to Original", key="rec_reanchor",
+                     help="Reset all evolving strands back to their Phase-1 text"):
+            st.session_state.recurrent_prompt_states = {}
+            st.rerun()
+
+    with col_intensity:
+        intensity = st.select_slider(
+            "Mutation intensity",
+            options=["low", "medium", "high"],
+            value=st.session_state.recurrence_intensity,
+            key="rec_intensity_running",
+        )
+        st.session_state.recurrence_intensity = intensity
+
+    # ── Status line ───────────────────────────────────────────────────────────
+    recurrent_count = sum(1 for r in st.session_state.image_records if r.is_recurrent)
+    status = "⏸ Paused" if st.session_state.recurrence_paused else "● Running"
+    st.caption(
+        f"{status}  ·  Iteration {st.session_state.recurrence_iteration}"
+        f"  ·  {recurrent_count} recurrent image{'s' if recurrent_count != 1 else ''} generated"
+    )
+
+    # ── Active strand states ──────────────────────────────────────────────────
+    included = _prompts_included()
+    evolved = {
+        pid: txt for pid, txt in st.session_state.recurrent_prompt_states.items()
+        if txt != st.session_state.original_prompt_texts.get(pid, "")
+    }
+    if evolved:
+        with st.expander(f"Active strand states ({len(evolved)} evolved)", expanded=False):
+            for p in included:
+                current = st.session_state.recurrent_prompt_states.get(p.prompt_id)
+                if not current or current == p.text:
+                    continue
+                original = st.session_state.original_prompt_texts.get(p.prompt_id, p.text)
+                sim = compute_similarity(current, original)
+                st.caption(
+                    f"**{p.lens_name} · {p.specificity.capitalize()}**"
+                    f"  —  similarity to origin: `{sim:.2f}`"
+                )
+                st.text(current[:220] + "…" if len(current) > 220 else current)
+                st.divider()
+
+    # ── Recent recurrent image feed ───────────────────────────────────────────
+    recurrent_records = sorted(
+        [r for r in st.session_state.image_records if r.is_recurrent],
+        key=lambda r: r.created_at,
+        reverse=True,
+    )
+    if recurrent_records:
+        st.caption("Most recent recurrent images")
+        cols = st.columns(4)
+        for i, rec in enumerate(recurrent_records[:4]):
+            with cols[i]:
+                img_path = Path(rec.image_path)
+                if img_path.exists():
+                    st.image(str(img_path), use_container_width=True)
+                else:
+                    st.warning(f"Missing: {img_path.name}")
+                st.caption(f"`{rec.source_prompt_id}` · iter {rec.generation_iteration}")
+                st.caption(f"*{rec.mutation_note}*")
+                st.caption(f"similarity: `{rec.semantic_similarity:.2f}`")
+
+    # ── Auto-advance: generate one step then rerun ────────────────────────────
+    # This uses Streamlit's rerun as the loop clock. Each script execution
+    # renders the current state, generates one new image, then triggers the
+    # next execution. The user can stop this at any time with Pause or Finalize.
+    if not st.session_state.recurrence_paused and _prompts_included():
+        _run_one_recurrence_step()
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +637,9 @@ def render_phase2() -> None:
 
     # Compact overview of all prompts so user can jump to any of them
     _render_prompt_overview(included)
+
+    # Recurrence mode — continuous transformation layer
+    _render_recurrence_section()
 
 
 def _render_phase2_toolbar(included: List[Prompt], generated: int, target: int) -> None:
@@ -785,18 +977,24 @@ def render_phase3() -> None:
     )
     total_tokens = vocab["total_tokens"]
 
-    tab_overall, tab_lens, tab_spec = st.tabs(
-        ["Overall top 20", "By lens", "By specificity"]
-    )
+    recurrent_recs = [r for r in records if r.is_recurrent]
+    tab_labels = ["Overall top 20", "By lens", "By specificity"]
+    if recurrent_recs:
+        tab_labels.append("Recurrence Evolution")
+    tabs = st.tabs(tab_labels)
 
-    with tab_overall:
+    with tabs[0]:
         _render_vocab_overall(vocab, total_tokens)
 
-    with tab_lens:
+    with tabs[1]:
         _render_vocab_by_lens(vocab, total_tokens)
 
-    with tab_spec:
+    with tabs[2]:
         _render_vocab_by_specificity(vocab, total_tokens)
+
+    if recurrent_recs:
+        with tabs[3]:
+            _render_vocab_recurrence(vocab, recurrent_recs, total_tokens)
 
     st.divider()
 
@@ -858,6 +1056,19 @@ def render_phase3() -> None:
         "pinned": pinned_count,
         "images_with_notes": with_notes,
     })
+
+    # ── Section 5 — Recurrence Drift Analysis (only when recurrent data exists) ──
+    recurrent_recs = [r for r in records if r.is_recurrent]
+    if recurrent_recs:
+        st.divider()
+        st.subheader("Recurrence Drift Analysis")
+        st.caption(
+            f"{len(recurrent_recs)} recurrent image{'s' if len(recurrent_recs) != 1 else ''} "
+            f"across {st.session_state.recurrence_iteration} iterations  ·  "
+            "Tracks how vocabulary transforms as the seminal intention metabolises over time."
+        )
+        drift = analyze_drift(prompts, recurrent_recs, cfg.seminal_intention)
+        _render_drift_analysis(drift)
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +1148,85 @@ def _render_vocab_by_specificity(vocab: dict, total_tokens: int) -> None:
             st.markdown(f"**{spec.capitalize()} specificity**")
             df = _vocab_table(counter, 10, spec_total)
             st.dataframe(df, use_container_width=True, height=300)
+
+
+def _render_vocab_recurrence(
+    vocab_original: dict,
+    recurrent_records: List[ImageRecord],
+    total_tokens_original: int,
+) -> None:
+    """Side-by-side comparison of original vs recurrent vocabulary."""
+    from collections import Counter as _Counter
+    recurrent_freq: _Counter = _Counter()
+    seen: set[str] = set()
+    for rec in recurrent_records:
+        text = rec.current_prompt_text or rec.parent_prompt_text
+        if text and text not in seen:
+            from core.vocab import tokenize
+            recurrent_freq.update(tokenize(text))
+            seen.add(text)
+
+    if not recurrent_freq:
+        st.info("No recurrent prompt data yet.")
+        return
+
+    total_rec = sum(recurrent_freq.values()) or 1
+    col_orig, col_rec = st.columns(2)
+
+    with col_orig:
+        st.markdown("**Original prompts — top 20**")
+        df_orig = _vocab_table(vocab_original["overall_freq"], 20, total_tokens_original)
+        st.dataframe(df_orig, use_container_width=True, height=420)
+
+    with col_rec:
+        st.markdown("**Recurrent mutations — top 20**")
+        df_rec = _vocab_table(recurrent_freq, 20, total_rec)
+        st.dataframe(df_rec, use_container_width=True, height=420)
+
+
+def _render_drift_analysis(drift: dict) -> None:
+    """
+    Display anchor / emerging / fading terms and the drift-over-time chart.
+    Called from render_phase3 only when recurrent records exist.
+    """
+    col_anchor, col_emerge, col_fade = st.columns(3)
+
+    with col_anchor:
+        st.markdown("**Anchor terms**")
+        st.caption("From the seminal intention — still present in recurrent prompts")
+        if drift["anchor_terms"]:
+            st.write("  ·  ".join(drift["anchor_terms"]))
+        else:
+            st.caption("*(none detected — full drift from intention vocabulary)*")
+
+    with col_emerge:
+        st.markdown("**Emerging terms**")
+        st.caption("New vocabulary appearing in recurrent mutations")
+        if drift["emerging_terms"]:
+            df_em = pd.DataFrame(drift["emerging_terms"], columns=["word", "count"])
+            st.dataframe(df_em.set_index("word"), use_container_width=True, height=220)
+        else:
+            st.caption("*(none yet)*")
+
+    with col_fade:
+        st.markdown("**Fading terms**")
+        st.caption("Original vocabulary significantly declining in recurrent prompts")
+        if drift["fading_terms"]:
+            st.write("  ·  ".join(drift["fading_terms"]))
+        else:
+            st.caption("*(vocabulary holding stable)*")
+
+    # Drift-over-time chart
+    if drift["drift_over_time"]:
+        st.markdown("**Similarity drift over iterations**")
+        st.caption(
+            "Average Jaccard similarity of each recurrent mutation to its original "
+            "Phase-1 prompt text. 1.0 = unchanged; lower = further from origin."
+        )
+        drift_df = pd.DataFrame(drift["drift_over_time"]).set_index("iteration")
+        st.line_chart(drift_df["avg_similarity"], height=220)
+    else:
+        st.caption("Drift chart will appear once multiple iterations have completed.")
 
 
 # ---------------------------------------------------------------------------
