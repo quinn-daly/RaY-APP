@@ -62,15 +62,31 @@ Vocabulary frequency analysis broken down by lens and specificity level — reve
 - `Prompt` — prompt text, lens, specificity, locked/excluded/edited flags
 - `ImageRecord` — image path, source prompt, variation index, pin status, intervention note, user note
 
-## Prototype → Real Build Roadmap
-The two simulation modules need to be replaced with live API calls:
+## Current Status — Live Build (as of 2026-04-16)
 
-| Module | Current (Simulated) | Target (Live) |
-|---|---|---|
-| `core/prompt_sim.py` | Hash-based deterministic text | LLM API (Claude or GPT-4) |
-| `core/image_sim.py` | Geometric placeholder PNGs | Image API (DALL-E, Midjourney, or Stable Diffusion) |
+Both simulation modules have been replaced with live API integrations:
 
-Everything else — the workflow structure, data models, storage, and UI phases — carries over directly. The sim modules were designed to be drop-in replaceable.
+| Layer | Implementation | Provider | Env var |
+|---|---|---|---|
+| Prompt generation | `core/prompt_gen.py` | OpenAI gpt-4o-mini | `OPENAI_API_KEY` |
+| Image generation | `core/image_providers.py` | Replicate Flux Schnell (default) | `REPLICATE_API_TOKEN` |
+
+**Fallback behavior:** If an API key is absent or a call fails, the system silently degrades to the deterministic `prompt_sim` / `image_sim` placeholder path. No crash, no data loss.
+
+**Project structure additions:**
+```
+core/
+  prompt_gen.py     — LLM-based prompt generation (OpenAI gpt-4o-mini, with sim fallback)
+  image_providers.py — provider adapter layer (sim, replicate_flux, gemini_flash_image, openai_gpt_image)
+  recurrence.py     — mutation engine + lineage tracking
+```
+
+**Provider selector:** Visible in the sidebar when a run is active. Controls Phase 2 initial generation. Recurrence mode has its own separate selector in-UI.
+
+**ImageRecord lineage fields** (added for recurrence + live providers):
+- `parent_prompt_text`, `current_prompt_text`, `raw_prompt_text` — full text lineage
+- `mutation_note`, `semantic_similarity`, `generation_iteration`, `is_recurrent`
+- `provider_name`, `generation_time_ms`
 
 ## Dev Setup
 ```bash
@@ -86,7 +102,7 @@ streamlit run app.py
 ```
 
 ## Important Notes
-- **Do not touch working prototype logic** unless we are explicitly building toward the live version
 - All app state lives in `st.session_state` — Streamlit reruns the full script on every interaction, this is normal
 - `runs/` grows with every session — clean up manually if it gets large
-- When suggesting the live build approach, always present API options with tradeoffs (cost, quality, free tier availability)
+- `core/prompt_sim.py` is **still required** — `recurrence.py` imports `_BANKS` and `extract_concept` from it for mutation vocabulary; do not remove it
+- When adding providers, subclass `ImageProvider` in `image_providers.py`, implement `generate()`, and call `register(YourProvider())` at module level

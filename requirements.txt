@@ -1,3 +1,9 @@
 streamlit>=1.35.0
 Pillow>=10.0.0
 pandas>=2.0.0
+python-dotenv>=1.0.0
+
+# Live providers — install only what you need
+openai>=1.35.0          # prompt generation (gpt-4o-mini) + DALL-E 3 images
+replicate>=0.25.0       # Flux Schnell — cheapest real image provider
+# google-genai>=0.4.0  # Imagen 3 Fast / Pro — uncomment if using Gemini providers

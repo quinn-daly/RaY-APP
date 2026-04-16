@@ -1,10 +1,11 @@
 """
 Metabolic Prompt Studio — Streamlit App
-A concept-demo workflow for architectural AI prompt design.
-
-All outputs are SIMULATED. No external APIs are called.
+Structured research tool for architectural AI design exploration.
 
 Run with:  streamlit run app.py
+
+API keys are loaded automatically from a .env file in the project root.
+See CLAUDE.md for the expected .env structure.
 """
 
 from __future__ import annotations
@@ -16,12 +17,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+# Load .env before any provider or key-reading code executes.
+# Handles two layouts:
+#   Standard:  .env          (a file at project root)
+#   Alternate: .env/env.txt  (keys inside a .env folder — auto-detected)
+# This must stay above all `from core.` imports.
+from dotenv import load_dotenv
+
+_HERE = Path(__file__).resolve().parent
+_dotenv_file = _HERE / ".env"
+if _dotenv_file.is_dir():
+    _dotenv_file = _dotenv_file / "env.txt"
+load_dotenv(dotenv_path=_dotenv_file)
+
 import pandas as pd
 import streamlit as st
 
 from core.models import ImageRecord, Prompt, RunConfig
-from core.prompt_sim import DEFAULT_LENSES, generate_prompts
-from core.image_sim import generate_placeholder_image
+from core.prompt_sim import DEFAULT_LENSES
+from core.prompt_gen import generate_prompts
 from core.vocab import analyze_vocab, analyze_drift, top_n
 from core import storage
 from core.recurrence import run_recurrence_step, compute_similarity
@@ -73,6 +87,8 @@ def _init_state() -> None:
         "recurrent_prompt_states": {},
         # per-strand immutable origin text: {prompt_id → original Phase-1 text}
         "original_prompt_texts":   {},
+        # ── phase-2 initial image provider ──────────────────────────────────
+        "p2_provider":                     "sim",   # provider for Phase 2 initial generation
         # ── recurrence pacing + provider ────────────────────────────────────
         "recurrence_provider":              "sim",   # provider name string
         "recurrence_interval":             2,        # seconds between auto steps
@@ -152,32 +168,59 @@ def _load_run_into_state(run_id: str) -> None:
 
 
 def _do_generate_images(prompt: Prompt, variation_index: int, note: str) -> ImageRecord:
-    """Generate one image and return a new ImageRecord (not yet appended)."""
+    """
+    Generate one image via the active p2_provider and return a new ImageRecord.
+
+    Reads st.session_state.p2_provider to select the provider. Falls back to
+    the sim provider silently on any ProviderError so a broken API key never
+    stalls a batch run.
+    """
     run_id = st.session_state.run_id
     img_id = _image_id(prompt.prompt_id, variation_index)
-    fname = f"{img_id}.png"
-    rel_path = f"runs/{run_id}/images/{fname}"
+    rel_path = f"runs/{run_id}/images/{img_id}.png"
     abs_path = Path(rel_path)
 
-    generate_placeholder_image(
-        prompt_text=prompt.text,
-        variation_index=variation_index,
-        intervention_note=note,
-        lens_id=prompt.lens_id,
-        lens_name=prompt.lens_name,
-        specificity=prompt.specificity,
-        output_path=abs_path,
-    )
+    provider_name = st.session_state.get("p2_provider", "sim")
+    try:
+        provider = get_provider(provider_name)
+    except ProviderError:
+        provider = get_provider("sim")
+        provider_name = "sim"
+
+    try:
+        result = provider.generate(
+            prompt=prompt.text,
+            output_path=abs_path,
+            variation_index=variation_index,
+            lens_id=prompt.lens_id,
+            lens_name=prompt.lens_name,
+            specificity=prompt.specificity,
+            intervention_note=note,
+        )
+    except ProviderError:
+        result = get_provider("sim").generate(
+            prompt=prompt.text,
+            output_path=abs_path,
+            variation_index=variation_index,
+            lens_id=prompt.lens_id,
+            lens_name=prompt.lens_name,
+            specificity=prompt.specificity,
+            intervention_note=note,
+        )
 
     return ImageRecord(
         image_id=img_id,
         source_prompt_id=prompt.prompt_id,
         variation_index=variation_index,
         intervention_note=note,
-        image_path=rel_path,
+        image_path=result.image_path,
         pinned=False,
         created_at=datetime.now().isoformat(timespec="seconds"),
         user_note=None,
+        provider_name=result.provider_name,
+        current_prompt_text=result.prompt_used,
+        raw_prompt_text=result.raw_prompt or prompt.text,
+        generation_time_ms=result.generation_time_ms,
     )
 
 
@@ -530,7 +573,14 @@ def _render_recurrence_section() -> None:
 
 def render_sidebar() -> None:
     st.sidebar.title("⬡ Metabolic Prompt Studio")
-    st.sidebar.caption("Demo mode — all outputs are simulated, no API calls are made.")
+    _openai_ok    = bool(os.environ.get("OPENAI_API_KEY"))
+    _replicate_ok = bool(os.environ.get("REPLICATE_API_TOKEN"))
+    _google_ok    = bool(os.environ.get("GOOGLE_API_KEY"))
+    st.sidebar.caption(
+        f"OpenAI: {'✓' if _openai_ok else '✗'}  "
+        f"Replicate: {'✓' if _replicate_ok else '✗'}  "
+        f"Google: {'✓' if _google_ok else '✗'}"
+    )
     st.sidebar.divider()
 
     # --- New Run ---
@@ -614,6 +664,31 @@ def render_sidebar() -> None:
         # Autosave indicator
         if st.session_state._last_saved:
             st.sidebar.caption(f"Autosaved at {st.session_state._last_saved}")
+
+        # Image provider — controls both Phase 2 initial generation and is the
+        # default for new recurrence sessions (recurrence has its own in-UI selector)
+        st.sidebar.divider()
+        st.sidebar.caption("**Image provider**")
+        _cur_p2 = st.session_state.get("p2_provider", "sim")
+        if _cur_p2 not in ROLLOUT_PROVIDERS:
+            _cur_p2 = "sim"
+        _chosen_p2 = st.sidebar.selectbox(
+            "Image provider",
+            options=ROLLOUT_PROVIDERS,
+            format_func=provider_label,
+            index=ROLLOUT_PROVIDERS.index(_cur_p2),
+            key="sb_p2_provider",
+            label_visibility="collapsed",
+        )
+        st.session_state.p2_provider = _chosen_p2
+        if _chosen_p2 != "sim":
+            _key_needed = {
+                "replicate_flux":    "REPLICATE_API_TOKEN",
+                "gemini_flash_image":"GOOGLE_API_KEY",
+                "openai_gpt_image":  "OPENAI_API_KEY",
+            }.get(_chosen_p2)
+            if _key_needed and not os.environ.get(_key_needed):
+                st.sidebar.warning(f"`{_key_needed}` not set — will fall back to sim.", icon="⚠️")
     else:
         st.sidebar.info("Create a new run or load an existing one to begin.")
 
@@ -673,12 +748,19 @@ def render_phase1() -> None:
             st.caption(f"{len(st.session_state.prompts)} prompts generated")
 
     if gen_clicked:
+        if not os.environ.get("OPENAI_API_KEY"):
+            st.warning(
+                "OPENAI_API_KEY not set — using deterministic simulation for prompts. "
+                "Set the key and regenerate to get live LLM-generated prompts.",
+                icon="⚠️",
+            )
         with st.spinner("Refracting intention into 12 prompts…"):
             prompts = generate_prompts(cfg.seminal_intention, cfg.lenses)
             st.session_state.prompts = prompts
             storage.save_prompts(cfg.run_id, prompts)
         _clear_prompt_widget_cache(st.session_state.prompts)
-        st.success("12 prompts generated and saved.")
+        mode = "live" if os.environ.get("OPENAI_API_KEY") else "simulated"
+        st.success(f"12 prompts generated and saved. *(prompt mode: {mode})*")
         st.rerun()
 
     if not st.session_state.prompts:
@@ -785,7 +867,11 @@ def render_phase2() -> None:
     with col_prog:
         progress_frac = generated / target if target > 0 else 0
         st.progress(progress_frac, text=f"Images generated: {generated} / {target}")
-        st.caption("Simulated placeholder compositions — no AI model is called.")
+        _p2_prov = st.session_state.get("p2_provider", "sim")
+        if _p2_prov == "sim":
+            st.caption("Image provider: sim — placeholder compositions, no API calls.")
+        else:
+            st.caption(f"Image provider: `{_p2_prov}` — real API calls active.")
     with col_cta:
         if generated == target:
             if st.button("Go to Phase 3 →", type="primary", use_container_width=True):
@@ -1615,11 +1701,19 @@ def _render_export_buttons(
 
 def render_welcome() -> None:
     st.title("⬡ Metabolic Prompt Studio")
-    st.info(
-        "**Demo mode** — all prompt generation and image outputs are simulated locally. "
-        "No external API calls are made.",
-        icon="ℹ️",
-    )
+    _pk = bool(os.environ.get("OPENAI_API_KEY"))
+    if _pk:
+        st.info(
+            "**Live mode** — prompt generation uses OpenAI gpt-4o-mini. "
+            "Set an image provider in the sidebar after creating a run.",
+            icon="✅",
+        )
+    else:
+        st.info(
+            "**Simulation mode** — no API keys detected, outputs are deterministic placeholders. "
+            "Set OPENAI_API_KEY and/or REPLICATE_API_TOKEN to enable live generation.",
+            icon="ℹ️",
+        )
     st.markdown(
         """
 A concept-demo workflow for architectural AI prompt design.
