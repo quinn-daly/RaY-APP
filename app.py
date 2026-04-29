@@ -108,15 +108,27 @@ _init_state()
 
 
 def _go_to_phase(n: int) -> None:
-    """Set current phase and keep the sidebar radio widget in sync.
+    """Phase navigation — safe to call from on_click/on_change callbacks only.
 
-    The sidebar radio uses key='sb_phase_nav', so Streamlit persists its own
-    widget state and ignores the index= parameter on reruns. Without this
-    sync, any button that sets current_phase + calls st.rerun() is immediately
-    overwritten by the radio restoring its stale value.
+    Callbacks run BEFORE the script re-renders, so writing to the radio's
+    session-state key here is allowed. Calling this outside a callback (i.e.
+    inside an `if st.button():` body after the sidebar has already rendered)
+    raises StreamlitAPIException because the widget key is locked post-render.
     """
     st.session_state.current_phase = n
     st.session_state["sb_phase_nav"] = n
+
+
+def _on_run_load() -> None:
+    """on_change callback for the Load Run selectbox."""
+    selected = st.session_state.get("sb_load_run")
+    if not selected or selected == "— select a run —":
+        return
+    if selected == st.session_state.run_id:
+        return
+    _load_run_into_state(selected)
+    _go_to_phase(1)
+    st.session_state.p2_focused_idx = 0
 
 
 # ---------------------------------------------------------------------------
@@ -606,17 +618,13 @@ def render_sidebar() -> None:
         options = ["— select a run —"] + runs
         current_idx = (runs.index(st.session_state.run_id) + 1
                        if st.session_state.run_id in runs else 0)
-        selected = st.sidebar.selectbox(
+        st.sidebar.selectbox(
             "Load existing run",
             options=options,
             index=current_idx,
             key="sb_load_run",
+            on_change=_on_run_load,
         )
-        if selected != "— select a run —" and selected != st.session_state.run_id:
-            _load_run_into_state(selected)
-            _go_to_phase(1)
-            st.session_state.p2_focused_idx = 0
-            st.rerun()
 
     st.sidebar.divider()
 
@@ -696,9 +704,8 @@ def render_phase1() -> None:
         st.caption(f"Run: `{cfg.run_id}` · Created: {cfg.created_at}")
     with col_proceed:
         if st.session_state.prompts:
-            if st.button("Go to Phase 2 →", type="primary", use_container_width=True):
-                _go_to_phase(2)
-                st.rerun()
+            st.button("Go to Phase 2 →", type="primary", use_container_width=True,
+                      on_click=_go_to_phase, args=(2,))
     st.divider()
 
     # Lens editor
@@ -770,9 +777,8 @@ def render_phase1() -> None:
             _render_prompt_card(p, spec_badge)
 
     st.divider()
-    if st.button("Proceed to Phase 2 →", type="primary"):
-        _go_to_phase(2)
-        st.rerun()
+    st.button("Proceed to Phase 2 →", type="primary",
+              on_click=_go_to_phase, args=(2,))
 
 
 def _render_prompt_card(p: Prompt, spec_badge: dict) -> None:
@@ -834,17 +840,13 @@ def render_phase2() -> None:
 
     if not st.session_state.prompts:
         st.warning("No prompts found — complete Phase 1 first.")
-        if st.button("← Back to Phase 1"):
-            _go_to_phase(1)
-            st.rerun()
+        st.button("← Back to Phase 1", on_click=_go_to_phase, args=(1,))
         return
 
     included = _prompts_included()
     if not included:
         st.warning("All prompts are excluded. Re-include some in Phase 1.")
-        if st.button("← Back to Phase 1"):
-            _go_to_phase(1)
-            st.rerun()
+        st.button("← Back to Phase 1", on_click=_go_to_phase, args=(1,))
         return
 
     target = len(included) * 4
@@ -862,9 +864,8 @@ def render_phase2() -> None:
         st.caption(f"Image provider: `{_p2_prov}`")
     with col_cta:
         if generated >= target:
-            if st.button("Go to Phase 3 →", type="primary", use_container_width=True):
-                _go_to_phase(3)
-                st.rerun()
+            st.button("Go to Phase 3 →", type="primary", use_container_width=True,
+                      on_click=_go_to_phase, args=(3,))
         else:
             st.button(
                 f"Phase 3 ({remaining} images remaining)",
@@ -1187,9 +1188,7 @@ def render_phase3() -> None:
 
     if not prompts:
         st.warning("No prompts found — complete Phase 1 first.")
-        if st.button("← Back to Phase 1"):
-            _go_to_phase(1)
-            st.rerun()
+        st.button("← Back to Phase 1", on_click=_go_to_phase, args=(1,))
         return
 
     # Pre-compute summary counts used by multiple sections
