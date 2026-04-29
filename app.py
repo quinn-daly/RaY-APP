@@ -106,6 +106,19 @@ def _init_state() -> None:
 
 _init_state()
 
+
+def _go_to_phase(n: int) -> None:
+    """Set current phase and keep the sidebar radio widget in sync.
+
+    The sidebar radio uses key='sb_phase_nav', so Streamlit persists its own
+    widget state and ignores the index= parameter on reruns. Without this
+    sync, any button that sets current_phase + calls st.rerun() is immediately
+    overwritten by the radio restoring its stale value.
+    """
+    st.session_state.current_phase = n
+    st.session_state["sb_phase_nav"] = n
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -599,7 +612,7 @@ def render_sidebar() -> None:
             st.session_state.prompt_edits = {}
             st.session_state.intervention_notes = {}
             st.session_state.image_user_notes = {}
-            st.session_state.current_phase = 1
+            _go_to_phase(1)
             st.session_state.p2_focused_idx = 0
             st.session_state._last_saved = None
             st.rerun()
@@ -619,7 +632,7 @@ def render_sidebar() -> None:
         )
         if selected != "— select a run —" and selected != st.session_state.run_id:
             _load_run_into_state(selected)
-            st.session_state.current_phase = 1
+            _go_to_phase(1)
             st.session_state.p2_focused_idx = 0
             st.rerun()
 
@@ -702,7 +715,7 @@ def render_phase1() -> None:
     with col_proceed:
         if st.session_state.prompts:
             if st.button("Go to Phase 2 →", type="primary", use_container_width=True):
-                st.session_state.current_phase = 2
+                _go_to_phase(2)
                 st.rerun()
     st.divider()
 
@@ -776,7 +789,7 @@ def render_phase1() -> None:
 
     st.divider()
     if st.button("Proceed to Phase 2 →", type="primary"):
-        st.session_state.current_phase = 2
+        _go_to_phase(2)
         st.rerun()
 
 
@@ -840,7 +853,7 @@ def render_phase2() -> None:
     if not st.session_state.prompts:
         st.warning("No prompts found — complete Phase 1 first.")
         if st.button("← Back to Phase 1"):
-            st.session_state.current_phase = 1
+            _go_to_phase(1)
             st.rerun()
         return
 
@@ -848,7 +861,7 @@ def render_phase2() -> None:
     if not included:
         st.warning("All prompts are excluded. Re-include some in Phase 1.")
         if st.button("← Back to Phase 1"):
-            st.session_state.current_phase = 1
+            _go_to_phase(1)
             st.rerun()
         return
 
@@ -868,7 +881,7 @@ def render_phase2() -> None:
     with col_cta:
         if generated >= target:
             if st.button("Go to Phase 3 →", type="primary", use_container_width=True):
-                st.session_state.current_phase = 3
+                _go_to_phase(3)
                 st.rerun()
         else:
             st.button(
@@ -1176,7 +1189,7 @@ def render_phase3() -> None:
     if not prompts:
         st.warning("No prompts found — complete Phase 1 first.")
         if st.button("← Back to Phase 1"):
-            st.session_state.current_phase = 1
+            _go_to_phase(1)
             st.rerun()
         return
 
