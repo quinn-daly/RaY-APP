@@ -698,24 +698,18 @@ register(ReplicateFluxProvider())
 # selector; it remains callable via get_provider("gemini_pro_image") for
 # scripted or advanced use, but the UI guides users through these four tiers.
 ROLLOUT_PROVIDERS: List[str] = [
-    "sim",
     "replicate_flux",
-    "gemini_flash_image",
     "openai_gpt_image",
 ]
 
 _PROVIDER_LABELS: Dict[str, str] = {
-    "sim":               "sim — placeholder (free, instant)",
-    "replicate_flux":    "replicate_flux — Flux Schnell (~$0.003/image, ~1-3 s)",
-    "gemini_flash_image":"gemini_flash_image — Imagen 3 Fast (~$0.02-0.04/image, ~3-6 s)",
-    "openai_gpt_image":  "openai_gpt_image — DALL-E 3, curated (~$0.04/image, ~8-15 s)",
+    "replicate_flux":   "replicate_flux — Flux Schnell (~$0.003/image, ~1-3 s)",
+    "openai_gpt_image": "openai_gpt_image — DALL-E 3, curated (~$0.04/image, ~8-15 s)",
 }
 
 _PROVIDER_TIERS: Dict[str, str] = {
-    "sim":               "default",
-    "replicate_flux":    "research",
-    "gemini_flash_image":"comparison",
-    "openai_gpt_image":  "curated",
+    "replicate_flux":   "research",
+    "openai_gpt_image": "curated",
 }
 
 

@@ -88,9 +88,9 @@ def _init_state() -> None:
         # per-strand immutable origin text: {prompt_id → original Phase-1 text}
         "original_prompt_texts":   {},
         # ── phase-2 initial image provider ──────────────────────────────────
-        "p2_provider":                     "sim",   # provider for Phase 2 initial generation
+        "p2_provider":                     "replicate_flux",
         # ── recurrence pacing + provider ────────────────────────────────────
-        "recurrence_provider":              "sim",   # provider name string
+        "recurrence_provider":              "replicate_flux",
         "recurrence_interval":             2,        # seconds between auto steps
         "recurrence_steps_per_cycle":      1,        # steps generated before each rerun
         "recurrence_logging_cadence":      5,        # save to disk every N steps
@@ -342,14 +342,12 @@ def _render_recurrence_section() -> None:
         # Provider selector — rollout order
         st.markdown("**Image provider**")
         st.caption(
-            "Tier 1 (sim) is free and instant. "
-            "Move to Tier 2 (replicate_flux) for real imagery in research runs. "
-            "Tier 3 (gemini_flash_image) adds a second live provider for comparison. "
-            "Tier 4 (openai_gpt_image) is reserved for curated final runs."
+            "replicate_flux — fast, low cost, good for high-volume research runs.  \n"
+            "openai_gpt_image — DALL-E 3, strongest instruction-following, for curated outputs."
         )
-        current_p = st.session_state.get("recurrence_provider", "sim")
+        current_p = st.session_state.get("recurrence_provider", "replicate_flux")
         if current_p not in ROLLOUT_PROVIDERS:
-            current_p = "sim"
+            current_p = "replicate_flux"
         tier_labels = [provider_label(p) for p in ROLLOUT_PROVIDERS]
         chosen_label = st.radio(
             "Select provider",
@@ -462,9 +460,9 @@ def _render_recurrence_section() -> None:
         st.session_state.recurrence_intensity = intensity
 
     with col_provider_run:
-        current_p_run = st.session_state.get("recurrence_provider", "sim")
+        current_p_run = st.session_state.get("recurrence_provider", "replicate_flux")
         if current_p_run not in ROLLOUT_PROVIDERS:
-            current_p_run = "sim"
+            current_p_run = "replicate_flux"
         tier_labels_run = [provider_label(p) for p in ROLLOUT_PROVIDERS]
         chosen_run = st.selectbox(
             "Switch provider",
@@ -575,11 +573,9 @@ def render_sidebar() -> None:
     st.sidebar.title("⬡ Metabolic Prompt Studio")
     _openai_ok    = bool(os.environ.get("OPENAI_API_KEY"))
     _replicate_ok = bool(os.environ.get("REPLICATE_API_TOKEN"))
-    _google_ok    = bool(os.environ.get("GOOGLE_API_KEY"))
     st.sidebar.caption(
         f"OpenAI: {'✓' if _openai_ok else '✗'}  "
-        f"Replicate: {'✓' if _replicate_ok else '✗'}  "
-        f"Google: {'✓' if _google_ok else '✗'}"
+        f"Replicate: {'✓' if _replicate_ok else '✗'}"
     )
     st.sidebar.divider()
 
@@ -669,9 +665,9 @@ def render_sidebar() -> None:
         # default for new recurrence sessions (recurrence has its own in-UI selector)
         st.sidebar.divider()
         st.sidebar.caption("**Image provider**")
-        _cur_p2 = st.session_state.get("p2_provider", "sim")
+        _cur_p2 = st.session_state.get("p2_provider", "replicate_flux")
         if _cur_p2 not in ROLLOUT_PROVIDERS:
-            _cur_p2 = "sim"
+            _cur_p2 = "replicate_flux"
         _chosen_p2 = st.sidebar.selectbox(
             "Image provider",
             options=ROLLOUT_PROVIDERS,
@@ -681,14 +677,12 @@ def render_sidebar() -> None:
             label_visibility="collapsed",
         )
         st.session_state.p2_provider = _chosen_p2
-        if _chosen_p2 != "sim":
-            _key_needed = {
-                "replicate_flux":    "REPLICATE_API_TOKEN",
-                "gemini_flash_image":"GOOGLE_API_KEY",
-                "openai_gpt_image":  "OPENAI_API_KEY",
-            }.get(_chosen_p2)
-            if _key_needed and not os.environ.get(_key_needed):
-                st.sidebar.warning(f"`{_key_needed}` not set — will fall back to sim.", icon="⚠️")
+        _key_needed = {
+            "replicate_flux":   "REPLICATE_API_TOKEN",
+            "openai_gpt_image": "OPENAI_API_KEY",
+        }.get(_chosen_p2)
+        if _key_needed and not os.environ.get(_key_needed):
+            st.sidebar.warning(f"`{_key_needed}` not set.", icon="⚠️")
     else:
         st.sidebar.info("Create a new run or load an existing one to begin.")
 
@@ -869,11 +863,8 @@ def render_phase2() -> None:
     with col_prog:
         progress_frac = min(generated / target, 1.0) if target > 0 else 0.0
         st.progress(progress_frac, text=f"Images generated: {generated} / {target}")
-        _p2_prov = st.session_state.get("p2_provider", "sim")
-        if _p2_prov == "sim":
-            st.caption("Image provider: sim — placeholder compositions, no API calls.")
-        else:
-            st.caption(f"Image provider: `{_p2_prov}` — real API calls active.")
+        _p2_prov = st.session_state.get("p2_provider", "replicate_flux")
+        st.caption(f"Image provider: `{_p2_prov}`")
     with col_cta:
         if generated >= target:
             if st.button("Go to Phase 3 →", type="primary", use_container_width=True):
@@ -1703,26 +1694,32 @@ def _render_export_buttons(
 
 def render_welcome() -> None:
     st.title("⬡ Metabolic Prompt Studio")
-    _pk = bool(os.environ.get("OPENAI_API_KEY"))
-    if _pk:
+    _openai_ok    = bool(os.environ.get("OPENAI_API_KEY"))
+    _replicate_ok = bool(os.environ.get("REPLICATE_API_TOKEN"))
+    if _openai_ok and _replicate_ok:
         st.info(
-            "**Live mode** — prompt generation uses OpenAI gpt-4o-mini. "
-            "Set an image provider in the sidebar after creating a run.",
+            "Both providers active — Replicate Flux Schnell and DALL-E 3 available.",
+            icon="✅",
+        )
+    elif _openai_ok or _replicate_ok:
+        active = "OpenAI (DALL-E 3)" if _openai_ok else "Replicate (Flux Schnell)"
+        missing = "REPLICATE_API_TOKEN" if _openai_ok else "OPENAI_API_KEY"
+        st.info(
+            f"{active} active. Set `{missing}` to enable the other provider.",
             icon="✅",
         )
     else:
-        st.info(
-            "**Simulation mode** — no API keys detected, outputs are deterministic placeholders. "
-            "Set OPENAI_API_KEY and/or REPLICATE_API_TOKEN to enable live generation.",
-            icon="ℹ️",
+        st.warning(
+            "No API keys detected — set OPENAI_API_KEY and/or REPLICATE_API_TOKEN in Streamlit secrets.",
+            icon="⚠️",
         )
     st.markdown(
         """
-A concept-demo workflow for architectural AI prompt design.
+A structured research workflow for architectural AI prompt design.
 
 **Three phases:**
 1. **Prompt Refraction** — Enter a seminal intention. The app refracts it into 12 prompts across 4 conceptual lenses × 3 specificity levels.
-2. **Image Generation** — Each prompt generates 4 placeholder image variations. You intervene, evaluate, and pin.
+2. **Image Generation** — Each prompt generates 4 image variations via Replicate or DALL-E 3. Intervene, evaluate, and pin.
 3. **Recap & Analysis** — Vocabulary frequency analysis, pinned gallery, and data export.
 
 **To begin:** enter a seminal intention in the sidebar and click *Create Run* →
