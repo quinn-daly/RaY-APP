@@ -859,13 +859,15 @@ def render_phase2() -> None:
         return
 
     target = len(included) * 4
-    generated = _total_images_generated()
-    remaining = target - generated
+    # Count only initial (non-recurrent) images for progress — recurrent images
+    # are unbounded and would push the fraction above 1.0, crashing st.progress.
+    generated = sum(1 for r in st.session_state.image_records if not r.is_recurrent)
+    remaining = max(target - generated, 0)
 
     # Header row: progress + proceed button
     col_prog, col_cta = st.columns([3, 1])
     with col_prog:
-        progress_frac = generated / target if target > 0 else 0
+        progress_frac = min(generated / target, 1.0) if target > 0 else 0.0
         st.progress(progress_frac, text=f"Images generated: {generated} / {target}")
         _p2_prov = st.session_state.get("p2_provider", "sim")
         if _p2_prov == "sim":
@@ -873,7 +875,7 @@ def render_phase2() -> None:
         else:
             st.caption(f"Image provider: `{_p2_prov}` — real API calls active.")
     with col_cta:
-        if generated == target:
+        if generated >= target:
             if st.button("Go to Phase 3 →", type="primary", use_container_width=True):
                 st.session_state.current_phase = 3
                 st.rerun()
