@@ -572,15 +572,15 @@ class OpenAIGPTImageProvider(ImageProvider):
 
 class ReplicateFluxProvider(ImageProvider):
     """
-    Flux Schnell by Black Forest Labs via the Replicate API.
+    Flux Schnell by Black Forest Labs via the Replicate HTTP API (no SDK).
+
+    Uses direct HTTP calls so it works on Python 3.14+ where the replicate
+    SDK's pydantic v1 dependency is broken.
 
     Best for: high-volume research runs where cost is the primary constraint.
-    Fastest live provider; excellent quality-to-cost ratio. Good for
-    establishing visual patterns across many mutations before committing
-    to a higher-cost provider for final outputs.
+    Fastest live provider; excellent quality-to-cost ratio.
 
     Requirements:
-        pip install replicate
         REPLICATE_API_TOKEN environment variable
 
     Cost:    ~$0.003/image (verify at replicate.com/pricing)
@@ -603,36 +603,67 @@ class ReplicateFluxProvider(ImageProvider):
         variation_index: int = 0,
         **kwargs: Any,
     ) -> ImageResult:
-        try:
-            import replicate as _replicate
-        except ImportError:
-            raise ProviderError(
-                "replicate SDK not installed. "
-                "Run: pip install replicate"
-            )
+        import json
+        import urllib.request
+        import urllib.error
 
-        if not os.environ.get("REPLICATE_API_TOKEN"):
+        api_token = os.environ.get("REPLICATE_API_TOKEN")
+        if not api_token:
             raise ProviderError(
                 "REPLICATE_API_TOKEN environment variable is not set."
             )
 
-        import urllib.request
-
         shaped = shape_prompt(prompt, self.name, **kwargs)
-        t0     = time.monotonic()
-        output = _replicate.run(
-            self.model,
-            input={
+        t0 = time.monotonic()
+
+        create_url = f"https://api.replicate.com/v1/models/{self.model}/predictions"
+        payload = json.dumps({
+            "input": {
                 "prompt": shaped,
                 "num_outputs": 1,
                 "output_format": "png",
-                "num_inference_steps": 4,  # Flux Schnell sweet spot
-            },
-        )
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                "num_inference_steps": 4,
+            }
+        }).encode()
+        headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+            "Prefer": "wait",
+        }
 
-        # output is a list of FileOutput objects; retrieve the first
-        image_url = str(output[0])
+        try:
+            req = urllib.request.Request(create_url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode(errors="replace")
+            raise ProviderError(f"Replicate API error {exc.code}: {body}") from exc
+
+        # Poll if Prefer:wait didn't return a completed prediction
+        if result.get("status") not in ("succeeded",):
+            poll_url = result["urls"]["get"]
+            poll_headers = {"Authorization": f"Bearer {api_token}"}
+            for _ in range(60):
+                time.sleep(2)
+                req = urllib.request.Request(poll_url, headers=poll_headers)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read())
+                status = result.get("status")
+                if status == "succeeded":
+                    break
+                if status in ("failed", "canceled"):
+                    raise ProviderError(
+                        f"Replicate prediction {status}: {result.get('error', '')}"
+                    )
+            else:
+                raise ProviderError("Replicate prediction timed out after 120 seconds.")
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        output_list = result.get("output") or []
+        if not output_list:
+            raise ProviderError("Replicate returned no output URLs.")
+
+        image_url = output_list[0]
         output_path.parent.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(image_url, str(output_path))
 
