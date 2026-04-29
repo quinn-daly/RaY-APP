@@ -183,43 +183,25 @@ def _load_run_into_state(run_id: str) -> None:
 def _do_generate_images(prompt: Prompt, variation_index: int, note: str) -> ImageRecord:
     """
     Generate one image via the active p2_provider and return a new ImageRecord.
-
-    Reads st.session_state.p2_provider to select the provider. Falls back to
-    the sim provider silently on any ProviderError so a broken API key never
-    stalls a batch run.
+    Raises ProviderError on any failure — callers show the error; no silent fallback.
     """
     run_id = st.session_state.run_id
     img_id = _image_id(prompt.prompt_id, variation_index)
     rel_path = f"runs/{run_id}/images/{img_id}.png"
     abs_path = Path(rel_path)
 
-    provider_name = st.session_state.get("p2_provider", "sim")
-    try:
-        provider = get_provider(provider_name)
-    except ProviderError:
-        provider = get_provider("sim")
-        provider_name = "sim"
+    provider_name = st.session_state.get("p2_provider", "replicate_flux")
+    provider = get_provider(provider_name)   # raises ProviderError if unknown
 
-    try:
-        result = provider.generate(
-            prompt=prompt.text,
-            output_path=abs_path,
-            variation_index=variation_index,
-            lens_id=prompt.lens_id,
-            lens_name=prompt.lens_name,
-            specificity=prompt.specificity,
-            intervention_note=note,
-        )
-    except ProviderError:
-        result = get_provider("sim").generate(
-            prompt=prompt.text,
-            output_path=abs_path,
-            variation_index=variation_index,
-            lens_id=prompt.lens_id,
-            lens_name=prompt.lens_name,
-            specificity=prompt.specificity,
-            intervention_note=note,
-        )
+    result = provider.generate(             # raises ProviderError on API failure
+        prompt=prompt.text,
+        output_path=abs_path,
+        variation_index=variation_index,
+        lens_id=prompt.lens_id,
+        lens_name=prompt.lens_name,
+        specificity=prompt.specificity,
+        intervention_note=note,
+    )
 
     return ImageRecord(
         image_id=img_id,
@@ -967,7 +949,11 @@ def _render_phase2_toolbar(included: List[Prompt], generated: int, target: int) 
             disabled=remaining_count == 0,
             key="p2_gen_all",
         ):
-            _generate_all_remaining(included, st.session_state.prob_intervention)
+            try:
+                _generate_all_remaining(included, st.session_state.prob_intervention)
+            except ProviderError as exc:
+                st.error(f"Generation failed ({st.session_state.get('p2_provider')}): {exc}")
+                st.stop()
             st.rerun()
 
     with col_pin:
@@ -1031,7 +1017,11 @@ def _render_focused_card(p: Prompt) -> None:
         if not is_done:
             if st.button("Generate 4 Images", type="primary", key=f"gen_{p.prompt_id}"):
                 with st.spinner("Generating…"):
-                    _generate_for_prompt(p, note)
+                    try:
+                        _generate_for_prompt(p, note)
+                    except ProviderError as exc:
+                        st.error(f"Generation failed ({st.session_state.get('p2_provider')}): {exc}")
+                        st.stop()
                 st.rerun()
         else:
             st.success("4 / 4 generated")
@@ -1040,7 +1030,11 @@ def _render_focused_card(p: Prompt) -> None:
         if is_done:
             if st.button("🔄 Regenerate All 4", key=f"regenall_{p.prompt_id}"):
                 with st.spinner("Regenerating…"):
-                    _generate_for_prompt(p, note)
+                    try:
+                        _generate_for_prompt(p, note)
+                    except ProviderError as exc:
+                        st.error(f"Generation failed ({st.session_state.get('p2_provider')}): {exc}")
+                        st.stop()
                 st.rerun()
 
     with col_prob:
@@ -1162,7 +1156,11 @@ def _render_image_grid(p: Prompt, records: List[ImageRecord]) -> None:
             # Regenerate this one variation
             if st.button("🔄", key=f"regen1_{rec.image_id}", help="Regenerate this variation"):
                 current_note = st.session_state.intervention_notes.get(p.prompt_id, "")
-                new_rec = _do_generate_images(p, rec.variation_index, current_note + "_regen")
+                try:
+                    new_rec = _do_generate_images(p, rec.variation_index, current_note)
+                except ProviderError as exc:
+                    st.error(f"Generation failed ({st.session_state.get('p2_provider')}): {exc}")
+                    st.stop()
                 new_rec.pinned = rec.pinned
                 new_rec.user_note = rec.user_note
                 st.session_state.image_records = [
@@ -1172,7 +1170,8 @@ def _render_image_grid(p: Prompt, records: List[ImageRecord]) -> None:
                 _save_records()
                 st.rerun()
 
-            st.caption(f"v{rec.variation_index + 1}")
+            prov_label = rec.provider_name or "?"
+            st.caption(f"v{rec.variation_index + 1} · `{prov_label}`")
 
 
 # ---------------------------------------------------------------------------
